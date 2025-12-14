@@ -31,7 +31,7 @@ static SD_VARLINK_DEFINE_ERROR(PullError);
 
 SD_VARLINK_DEFINE_INTERFACE(
                 io_systemd_PullJob,
-                "io.systemd.PullWorker",
+                "io.systemd.PullJob",
                 SD_VARLINK_INTERFACE_COMMENT("An interface for directly downloading data"),
                 SD_VARLINK_SYMBOL_COMMENT("Instances to reuse data from for delta-updating"),
                 &vl_type_PullInstance,
