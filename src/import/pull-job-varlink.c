@@ -55,7 +55,7 @@ static void pull_job_on_progress(PullJob *job) {
         //
 }
 
-static int pull_raw(void) {
+static int pull_file(void) {
         _cleanup_(curl_glue_unrefp) CurlGlue *glue = NULL;
         int r;
 
@@ -97,7 +97,7 @@ static int pull_raw(void) {
         return -r;
 }
 
-static int vl_method_pull_raw(sd_varlink *link, sd_json_variant *json_parameters, sd_varlink_method_flags_t flags, void *userdata) {
+static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameters, sd_varlink_method_flags_t flags, void *userdata) {
 
         // parse only the parameters used by systemd-pull
 
@@ -140,7 +140,7 @@ static int vl_method_pull_raw(sd_varlink *link, sd_json_variant *json_parameters
              !FILE_SIZE_VALID(parameters.offset + parameters.size_max)))
                 return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameters", NULL);
 
-        r = pull_raw();
+        r = pull_file();
         if (r < 0)
                 return sd_varlink_error(link, "io.systemd.PullJob.PullError", NULL);
 
@@ -163,7 +163,7 @@ static int vl_server(void) {
         if (r < 0)
                 return log_error_errno(r, "Failed to add Varlink interface: %m");
 
-        r = sd_varlink_server_bind_method(varlink_server, "io.systemd.PullJob.PullRaw", vl_method_pull_raw);
+        r = sd_varlink_server_bind_method(varlink_server, "io.systemd.PullJob.PullFile", vl_method_pull_file);
         if (r < 0)
                 return log_error_errno(r, "Failed to bind Varlink method: %m");
 
