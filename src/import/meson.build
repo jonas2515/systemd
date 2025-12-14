@@ -22,6 +22,12 @@ systemd_pull_sources = files(
         'curl-util.c',
 )
 
+systemd_pull_job_varlink_sources = files(
+        'pull-job-varlink.c',
+        'pull-job.c',
+        'curl-util.c',
+)
+
 systemd_import_sources = files(
         'import.c',
         'import-raw.c',
@@ -58,6 +64,15 @@ executables += [
                 'name' : 'systemd-pull',
                 'public' : true,
                 'sources' : systemd_pull_sources,
+                'objects' : ['systemd-importd'],
+                'dependencies' : common_deps + [
+                        libopenssl,
+                ],
+        },
+        libexec_template + {
+                'name' : 'systemd-pull-job-varlink',
+                'public' : true,
+                'sources' : systemd_pull_job_varlink_sources,
                 'objects' : ['systemd-importd'],
                 'dependencies' : common_deps + [
                         libopenssl,
