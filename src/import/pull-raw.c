@@ -11,14 +11,18 @@
 #include "import-common.h"
 #include "import-util.h"
 #include "install-file.h"
+#include "io-util.h"
 #include "log.h"
 #include "mkdir-label.h"
+#include "path-util.h"
 #include "pull-common.h"
 #include "pull-job.h"
 #include "pull-raw.h"
 #include "qcow2-util.h"
+#include "sd-varlink.h"
 #include "string-util.h"
 #include "tmpfile-util.h"
+#include "varlink-util.h"
 #include "web-util.h"
 
 typedef enum RawProgress {
@@ -351,7 +355,7 @@ static int raw_pull_make_local_copy(RawPull *p) {
         if (!p->local)
                 return 0;
 
-        if (p->raw_job->etag_exists) {
+        if (false) { //p->raw_job->etag_exists) {
                 /* We have downloaded this one previously, reopen it */
 
                 assert(p->raw_job->disk_fd < 0);
@@ -575,7 +579,7 @@ static void raw_pull_job_on_finished(PullJob *j) {
         FOREACH_ARGUMENT(jj, p->settings_job, p->roothash_job, p->roothash_signature_job, p->verity_job)
                 pull_job_close_disk_fd(jj);
 
-        if (!p->raw_job->etag_exists) {
+        if (false) { //disable verificationf for now TODO //!p->raw_job->etag_exists) {
                 raw_pull_report_progress(p, RAW_VERIFYING);
 
                 r = pull_verify(p->verify,
@@ -613,7 +617,7 @@ static void raw_pull_job_on_finished(PullJob *j) {
                 if (r < 0)
                         goto finish;
 
-                if (!p->raw_job->etag_exists) {
+                if (true) { //!p->raw_job->etag_exists) {
                         /* This is a new download, verify it, and move it into place */
 
                         assert(p->temp_path);
@@ -812,6 +816,74 @@ static void raw_pull_job_on_progress(PullJob *j) {
         raw_pull_report_progress(p, RAW_DOWNLOADING);
 }
 
+
+static int url_get_protocol(const char *url, const char **protocol) {
+        const char *d;
+        size_t length;
+
+        assert(url);
+        assert(protocol);
+
+        /* Find colon separating protocol and hostname */
+        d = strchr(url, ':');
+        if (!d || url == d)
+                return -EINVAL;
+
+        length = d - url;
+
+        *protocol = strndup(url, length);
+        if (!*protocol)
+                return -ENOMEM;
+        return 0;
+}
+
+static int pull_file_job_begin(PullJob *j) {
+        int r;
+
+        assert(j);
+
+        if (j->state != PULL_JOB_INIT)
+                return -EBUSY;
+
+        const char *protocol;
+        r = url_get_protocol(j->url, &protocol);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse protocol from URL %s: %m", j->url);
+
+        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *pull_link = NULL;
+        r = sd_varlink_connect_address(&pull_link, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect systemd-pull-job-varlink: %m");
+
+        r = sd_varlink_set_allow_fd_passing_output(pull_link, true);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to enable varlink fd passing for write: %m");
+
+
+        j->on_open_disk(j);
+
+        int destination_fd_index = sd_varlink_push_fd(pull_link, TAKE_FD(j->disk_fd));
+        if (destination_fd_index < 0)
+                return log_error_errno(destination_fd_index, "Failed to push destination fd into varlink socket: %m");
+
+        const char *error_id = NULL;
+        r = varlink_callbo_and_log(
+                pull_link,
+                "io.systemd.PullJob.PullFile",
+                NULL,
+                &error_id,
+                //SD_JSON_BUILD_PAIR_STRING("checksum", digest),
+                SD_JSON_BUILD_PAIR_STRING("source", j->url),
+                SD_JSON_BUILD_PAIR_UNSIGNED("destinationFileDescriptor", destination_fd_index),
+                //SD_JSON_BUILD_PAIR("instances", SD_JSON_BUILD_VARIANT(instances_array)),
+                SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->offset), "offset", SD_JSON_BUILD_UNSIGNED(j->offset)),
+                SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->content_length), "maxSize", SD_JSON_BUILD_UNSIGNED(j->content_length)));
+
+        pull_job_finish(j, 0);
+
+        return r;
+}
+
 int raw_pull_start(
                 RawPull *p,
                 const char *url,
@@ -851,7 +923,7 @@ int raw_pull_start(
         p->verify = verify;
 
         /* Queue job for the image itself */
-        r = pull_job_new(&p->raw_job, url, p->glue, p);
+        r = pull_job_new(&p->raw_job, url, NULL, p);
         if (r < 0)
                 return r;
 
@@ -974,7 +1046,10 @@ int raw_pull_start(
                 j->on_progress = raw_pull_job_on_progress;
                 j->sync = FLAGS_SET(flags, IMPORT_SYNC);
 
-                r = pull_job_begin(j);
+                if (j != p->raw_job)
+                        r = pull_job_begin(j);
+                else
+                        r = pull_file_job_begin(j);
                 if (r < 0)
                         return r;
         }
