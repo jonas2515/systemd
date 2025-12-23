@@ -22,6 +22,8 @@ typedef struct MethodPullParameters {
         int destination_fd;
         uint64_t offset;
         uint64_t size_max;
+        const char *expected_checksum;
+        struct iovec checksum;
         sd_event *event;
         PullJob *job;
 } MethodPullParameters;
@@ -72,7 +74,7 @@ static int pull_file(void) {
 
         parameters.job->on_finished = pull_job_on_finished;
         //pull_job->on_open_disk = pull_job_on_open_disk;
-        parameters.job->calc_checksum = true; //controllable with parameter?
+        parameters.job->calc_checksum = parameters.expected_checksum != NULL;
         parameters.job->force_memory = false;
 
         if (parameters.size_max != UINT64_MAX)
@@ -97,6 +99,26 @@ static int pull_file(void) {
         return -r;
 }
 
+static int parse_checksum(const char *checksum, struct iovec *c) {
+        int r;
+        _cleanup_free_ void *h = NULL;
+        size_t n;
+
+        r = unhexmem(checksum, &h, &n);
+        if (r < 0 || n == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Invalid verification setting: %s", checksum);
+        if (n != 32)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "64 hex character SHA256 hash required when specifying explicit checksum, %zu specified", n * 2);
+
+        iovec_done(c);
+        c->iov_base = TAKE_PTR(h);
+        c->iov_len = n;
+
+        return 0;
+}
+
 static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameters, sd_varlink_method_flags_t flags, void *userdata) {
 
         // parse only the parameters used by systemd-pull
@@ -107,6 +129,7 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
                 { "instances",                 SD_JSON_VARIANT_ARRAY,         NULL,                          0,                                                    0 },
                 { "offset",                    SD_JSON_VARIANT_NUMBER,        sd_json_dispatch_uint64,       offsetof(MethodPullParameters, offset),               0 },
                 { "maxSize",                   SD_JSON_VARIANT_NUMBER,        sd_json_dispatch_uint64,       offsetof(MethodPullParameters, size_max),             0 },
+                { "expectedChecksum",          SD_JSON_VARIANT_STRING,        sd_json_dispatch_string,       offsetof(MethodPullParameters, expected_checksum),    0 },
                 {}
         };
 
@@ -115,6 +138,7 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
                 .destination_fd = -EBADF,
                 .offset = UINT64_MAX,
                 .size_max = UINT64_MAX,
+                .expected_checksum = NULL,
         };
         int r;
 
@@ -140,6 +164,12 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
              !FILE_SIZE_VALID(parameters.offset + parameters.size_max)))
                 return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameters", NULL);
 
+        if (parameters.expected_checksum) {
+                r = parse_checksum(parameters.expected_checksum, &parameters.checksum);
+                if (r < 0)
+                        return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameter", NULL);
+        }
+
         r = pull_file();
         if (r < 0)
                 return sd_varlink_error(link, "io.systemd.PullJob.PullError", NULL);
@@ -148,7 +178,7 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
         if (!h)
                 r = log_oom();
 
-        return sd_varlink_replybo(link, SD_JSON_BUILD_PAIR_STRING("checksum", h));
+        return sd_varlink_reply(link, NULL);
 }
 
 static int vl_server(void) {

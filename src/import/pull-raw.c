@@ -8,6 +8,7 @@
 #include "curl-util.h"
 #include "fd-util.h"
 #include "fs-util.h"
+#include "hexdecoct.h"
 #include "import-common.h"
 #include "import-util.h"
 #include "install-file.h"
@@ -579,7 +580,7 @@ static void raw_pull_job_on_finished(PullJob *j) {
         FOREACH_ARGUMENT(jj, p->settings_job, p->roothash_job, p->roothash_signature_job, p->verity_job)
                 pull_job_close_disk_fd(jj);
 
-        if (false) { //disable verificationf for now TODO //!p->raw_job->etag_exists) {
+        if (true) { //disable etags for now TODO //!p->raw_job->etag_exists) {
                 raw_pull_report_progress(p, RAW_VERIFYING);
 
                 r = pull_verify(p->verify,
@@ -872,7 +873,7 @@ static int pull_file_job_begin(PullJob *j) {
                 "io.systemd.PullJob.PullFile",
                 NULL,
                 &error_id,
-                //SD_JSON_BUILD_PAIR_STRING("checksum", digest),
+                SD_JSON_BUILD_PAIR_CONDITION(iovec_is_set(&j->expected_checksum), "expectedChecksum", SD_JSON_BUILD_STRING (hexmem(j->expected_checksum.iov_base, j->expected_checksum.iov_len))),
                 SD_JSON_BUILD_PAIR_STRING("source", j->url),
                 SD_JSON_BUILD_PAIR_UNSIGNED("destinationFileDescriptor", destination_fd_index),
                 //SD_JSON_BUILD_PAIR("instances", SD_JSON_BUILD_VARIANT(instances_array)),
