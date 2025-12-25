@@ -4,10 +4,9 @@
 #include "shared-forward.h"
 #include "import-common.h"
 #include "import-util.h"
-#include "pull-job.h"
-
-typedef struct CurlGlue CurlGlue;
-typedef struct PullJob PullJob;
+#include <sys/stat.h>
+#include "openssl-util.h"
+#include "pull-job-varlink.h"
 
 int pull_find_old_etags(
                 const char *url,
@@ -31,7 +30,6 @@ int pull_make_auxiliary_job(
                 int (*strip_suffixes)(const char *name, char **ret),
                 const char *suffix,
                 ImportVerify verify,
-                CurlGlue *glue,
                 PullJobOpenDisk on_open_disk,
                 PullJobFinished on_finished,
                 void *userdata);
@@ -40,7 +38,6 @@ int pull_make_verification_jobs(
                 PullJob **ret_signature_job,
                 ImportVerify verify,
                 const char *url,
-                CurlGlue *glue,
                 PullJobFinished on_finished,
                 void *userdata);
 

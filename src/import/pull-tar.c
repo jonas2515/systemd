@@ -19,7 +19,7 @@
 #include "pretty-print.h"
 #include "process-util.h"
 #include "pull-common.h"
-#include "pull-job.h"
+#include "pull-job-varlink.h"
 #include "pull-tar.h"
 #include "ratelimit.h"
 #include "rm-rf.h"
@@ -39,7 +39,6 @@ typedef enum TarProgress {
 
 typedef struct TarPull {
         sd_event *event;
-        CurlGlue *glue;
 
         ImportFlags flags;
         ImportVerify verify;
@@ -81,7 +80,6 @@ TarPull* tar_pull_unref(TarPull *p) {
         pull_job_unref(p->signature_job);
         pull_job_unref(p->settings_job);
 
-        curl_glue_unref(p->glue);
         sd_event_unref(p->event);
 
         if (p->temp_path) {
@@ -108,7 +106,6 @@ int tar_pull_new(
                 TarPullFinished on_finished,
                 void *userdata) {
 
-        _cleanup_(curl_glue_unrefp) CurlGlue *g = NULL;
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
         _cleanup_(tar_pull_unrefp) TarPull *p = NULL;
         _cleanup_free_ char *root = NULL;
@@ -129,10 +126,6 @@ int tar_pull_new(
                         return r;
         }
 
-        r = curl_glue_new(&g, e);
-        if (r < 0)
-                return r;
-
         p = new(TarPull, 1);
         if (!p)
                 return -ENOMEM;
@@ -142,16 +135,12 @@ int tar_pull_new(
                 .userdata = userdata,
                 .image_root = TAKE_PTR(root),
                 .event = TAKE_PTR(e),
-                .glue = TAKE_PTR(g),
                 .tar_pid = PIDREF_NULL,
                 .tree_fd = -EBADF,
                 .userns_fd = -EBADF,
                 .last_percent = UINT_MAX,
                 .progress_ratelimit = { 100 * USEC_PER_MSEC, 1 },
         };
-
-        p->glue->on_finished = pull_job_curl_on_finished;
-        p->glue->userdata = p;
 
         *ret = TAKE_PTR(p);
 
@@ -236,7 +225,7 @@ static int tar_pull_determine_path(
 
         assert(p->tar_job);
 
-        r = pull_make_path(p->tar_job->url, p->tar_job->etag, p->image_root, ".tar-", suffix, field);
+        r = pull_make_path(p->tar_job->url, NULL, p->image_root, ".tar-", suffix, field);
         if (r < 0)
                 return log_oom();
 
@@ -463,7 +452,7 @@ static void tar_pull_job_on_finished(PullJob *j) {
                 }
         }
 
-        if (!p->tar_job->etag_exists) {
+        if (true) { // !p->tar_job->etag_exists) {
                 /* This is a new download, verify it, and move it into place */
 
                 tar_pull_report_progress(p, TAR_VERIFYING);
@@ -506,7 +495,7 @@ static void tar_pull_job_on_finished(PullJob *j) {
                 if (r < 0)
                         goto finish;
 
-                if (!p->tar_job->etag_exists) {
+                if (true) { // !p->tar_job->etag_exists) {
                         /* This is a new download, verify it, and move it into place */
 
                         assert(p->temp_path);
@@ -716,7 +705,7 @@ int tar_pull_start(
         p->verify = verify;
 
         /* Set up download job for TAR file */
-        r = pull_job_new(&p->tar_job, url, p->glue, p);
+        r = pull_job_new(&p->tar_job, url, p);
         if (r < 0)
                 return r;
 
@@ -732,9 +721,9 @@ int tar_pull_start(
                 p->tar_job->calc_checksum = verify != IMPORT_VERIFY_NO;
 
         if (!FLAGS_SET(flags, IMPORT_DIRECT)) {
-                r = pull_find_old_etags(url, p->image_root, DT_DIR, ".tar-", NULL, &p->tar_job->old_etags);
-                if (r < 0)
-                        return r;
+                //r = pull_find_old_etags(url, p->image_root, DT_DIR, ".tar-", NULL, &p->tar_job->old_etags);
+                //if (r < 0)
+                //        return r;
         }
 
         /* Set up download of checksum/signature files */
@@ -743,7 +732,6 @@ int tar_pull_start(
                         &p->signature_job,
                         verify,
                         url,
-                        p->glue,
                         tar_pull_job_on_finished,
                         p);
         if (r < 0)
@@ -757,7 +745,6 @@ int tar_pull_start(
                                 tar_strip_suffixes,
                                 ".nspawn",
                                 verify,
-                                p->glue,
                                 tar_pull_job_on_open_disk_settings,
                                 tar_pull_job_on_finished,
                                 p);
@@ -778,7 +765,7 @@ int tar_pull_start(
                 j->on_progress = tar_pull_job_on_progress;
                 j->sync = FLAGS_SET(flags, IMPORT_SYNC);
 
-                r = pull_job_begin(j);
+                r = pull_file_job_begin(j);
                 if (r < 0)
                         return r;
         }

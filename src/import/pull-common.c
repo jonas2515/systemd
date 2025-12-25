@@ -14,7 +14,6 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "pull-common.h"
-#include "pull-job.h"
 #include "rm-rf.h"
 #include "siphash24.h"
 #include "string-util.h"
@@ -172,7 +171,6 @@ int pull_make_auxiliary_job(
                 int (*strip_suffixes)(const char *name, char **ret),
                 const char *suffix,
                 ImportVerify verify,
-                CurlGlue *glue,
                 PullJobOpenDisk on_open_disk,
                 PullJobFinished on_finished,
                 void *userdata) {
@@ -185,7 +183,6 @@ int pull_make_auxiliary_job(
         assert(ret);
         assert(url);
         assert(strip_suffixes);
-        assert(glue);
 
         r = import_url_last_component(url, &last_component);
         if (r < 0)
@@ -201,7 +198,7 @@ int pull_make_auxiliary_job(
         if (r < 0)
                 return r;
 
-        r = pull_job_new(&job, auxiliary_url, glue, userdata);
+        r = pull_job_new(&job, auxiliary_url, userdata);
         if (r < 0)
                 return r;
 
@@ -249,7 +246,6 @@ int pull_make_verification_jobs(
                 PullJob **ret_signature_job,
                 ImportVerify verify,
                 const char *url,
-                CurlGlue *glue,
                 PullJobFinished on_finished,
                 void *userdata) {
 
@@ -262,7 +258,6 @@ int pull_make_verification_jobs(
         assert(verify == _IMPORT_VERIFY_INVALID || verify < _IMPORT_VERIFY_MAX);
         assert(verify == _IMPORT_VERIFY_INVALID || verify >= 0);
         assert(url);
-        assert(glue);
 
         /* If verification is turned off, or if the checksum to validate is already specified we don't need
          * to download a checksum file or signature, hence shortcut things */
@@ -294,7 +289,7 @@ int pull_make_verification_jobs(
                 if (r < 0)
                         return r;
 
-                r = pull_job_new(&checksum_job, checksum_url, glue, userdata);
+                r = pull_job_new(&checksum_job, checksum_url, userdata);
                 if (r < 0)
                         return r;
 
@@ -317,7 +312,7 @@ int pull_make_verification_jobs(
                 if (r < 0)
                         return r;
 
-                r = pull_job_new(&signature_job, signature_url, glue, userdata);
+                r = pull_job_new(&signature_job, signature_url, userdata);
                 if (r < 0)
                         return r;
 
@@ -346,8 +341,6 @@ static int verify_one(PullJob *checksum_job, PullJob *job) {
         if (job->state != PULL_JOB_DONE)
                 return 0;
         if (job->error != 0)
-                return 0;
-        if (job->etag_exists)
                 return 0;
 
         assert(job->calc_checksum);
