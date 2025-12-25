@@ -20,10 +20,11 @@ systemd_pull_sources = files(
         'pull-job.c',
         'pull-common.c',
         'curl-util.c',
+        'pull-job-varlink.c',
 )
 
 systemd_pull_job_varlink_sources = files(
-        'pull-job-varlink.c',
+        'pull-job-service.c',
         'pull-job.c',
         'curl-util.c',
 )
