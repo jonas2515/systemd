@@ -8,7 +8,7 @@
 #include "path-util.h"
 #include "import-util.h"
 #include "import-common.h"
-#include "pull-job-varlink.h"
+#include "pull-worker-varlink.h"
 #include "sd-varlink.h"
 #include "string-util.h"
 #include "varlink-util.h"

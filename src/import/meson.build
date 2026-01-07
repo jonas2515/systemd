@@ -16,7 +16,7 @@ systemd_importd_extract_sources = files(
 systemd_pull_sources = files(
         'pull.c',
         'pull-common.c',
-        'pull-job-varlink.c',
+        'pull-worker-varlink.c',
         'pull-raw.c',
         'pull-tar.c',
 )

@@ -6,7 +6,7 @@
 #include "import-util.h"
 #include <sys/stat.h>
 #include "openssl-util.h"
-#include "pull-job-varlink.h"
+#include "pull-worker-varlink.h"
 
 int pull_find_old_etags(
                 const char *url,

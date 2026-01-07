@@ -17,7 +17,7 @@
 #include "mkdir-label.h"
 #include "path-util.h"
 #include "pull-common.h"
-#include "pull-job-varlink.h"
+#include "pull-worker-varlink.h"
 #include "pull-raw.h"
 #include "qcow2-util.h"
 #include "sd-varlink.h"
