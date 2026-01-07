@@ -676,7 +676,8 @@ int tar_pull_start(
                 const char *local,
                 ImportFlags flags,
                 ImportVerify verify,
-                const struct iovec *checksum) {
+                const struct iovec *checksum,
+                sd_json_variant *instances) {
 
         int r;
 
@@ -725,6 +726,9 @@ int tar_pull_start(
                 //if (r < 0)
                 //        return r;
         }
+
+        if (instances != NULL)
+                p->tar_job->instances = TAKE_PTR(instances);
 
         /* Set up download of checksum/signature files */
         r = pull_make_verification_jobs(

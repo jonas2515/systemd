@@ -24,6 +24,7 @@
 #include "pull-raw.h"
 #include "pull-tar.h"
 #include "runtime-scope.h"
+#include "sd-json.h"
 #include "signal-util.h"
 #include "string-util.h"
 #include "verbs.h"
@@ -36,7 +37,9 @@ static uint64_t arg_offset = UINT64_MAX, arg_size_max = UINT64_MAX;
 static struct iovec arg_checksum = {};
 static ImageClass arg_class = IMAGE_MACHINE;
 static RuntimeScope arg_runtime_scope = _RUNTIME_SCOPE_INVALID;
+static sd_json_variant *arg_instances_array = NULL;
 
+STATIC_DESTRUCTOR_REGISTER(arg_instances_array, sd_json_variant_unrefp);
 STATIC_DESTRUCTOR_REGISTER(arg_checksum, iovec_done);
 STATIC_DESTRUCTOR_REGISTER(arg_image_root, freep);
 
@@ -163,7 +166,8 @@ static int pull_tar(int argc, char *argv[], void *userdata) {
                         normalized,
                         arg_import_flags & IMPORT_PULL_FLAGS_MASK_TAR,
                         arg_verify,
-                        &arg_checksum);
+                        &arg_checksum,
+                        TAKE_PTR(arg_instances_array));
         if (r < 0)
                 return log_error_errno(r, "Failed to pull image: %m");
 
@@ -232,7 +236,8 @@ static int pull_raw(int argc, char *argv[], void *userdata) {
                         arg_size_max,
                         arg_import_flags & IMPORT_PULL_FLAGS_MASK_RAW,
                         arg_verify,
-                        &arg_checksum);
+                        &arg_checksum,
+                        TAKE_PTR(arg_instances_array));
         if (r < 0)
                 return log_error_errno(r, "Failed to pull image: %m");
 
@@ -279,7 +284,8 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --keep-download=BOOL     Keep a copy pristine copy of the downloaded file\n"
                "                              around\n"
                "     --system                 Operate in per-system mode\n"
-               "     --user                   Operate in per-user mode\n",
+               "     --user                   Operate in per-user mode\n"
+               "     --instance=PATH          pass instance to the backend read-only",
                program_invocation_short_name,
                ansi_underline(),
                ansi_normal(),
@@ -312,6 +318,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_KEEP_DOWNLOAD,
                 ARG_SYSTEM,
                 ARG_USER,
+                ARG_INSTANCE,
         };
 
         static const struct option options[] = {
@@ -336,6 +343,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "keep-download",      required_argument, NULL, ARG_KEEP_DOWNLOAD      },
                 { "system",             no_argument,       NULL, ARG_SYSTEM             },
                 { "user",               no_argument,       NULL, ARG_USER               },
+                { "instance",           required_argument, NULL, ARG_INSTANCE           },
                 {}
         };
 
@@ -523,6 +531,16 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_USER:
                         arg_runtime_scope = RUNTIME_SCOPE_USER;
+                        break;
+
+                case ARG_INSTANCE:
+                        _cleanup_free_ char *tmp = NULL;
+                        r = parse_path_argument(optarg, /* suppress_root= */ false, &tmp);
+                        r = sd_json_variant_append_arraybo(
+                                &arg_instances_array,
+                                SD_JSON_BUILD_PAIR_STRING("location", tmp));
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse --instance= argument: %s", optarg);
                         break;
 
                 case '?':

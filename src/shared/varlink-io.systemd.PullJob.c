@@ -8,8 +8,6 @@
 
 static SD_VARLINK_DEFINE_STRUCT_TYPE(
                 PullInstance,
-                SD_VARLINK_FIELD_COMMENT("Version of the instance"),
-                SD_VARLINK_DEFINE_FIELD(version, SD_VARLINK_STRING, 0),
                 SD_VARLINK_FIELD_COMMENT("Path to the location of the instance on the system"),
                 SD_VARLINK_DEFINE_FIELD(location, SD_VARLINK_STRING, 0));
 

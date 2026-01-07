@@ -68,6 +68,8 @@ typedef struct PullJob {
 
         bool sync;
         bool force_memory;
+
+        sd_json_variant *instances;
 } PullJob;
 
 int pull_job_new(PullJob **ret, const char *url, void *userdata);

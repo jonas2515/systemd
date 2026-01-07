@@ -1197,6 +1197,13 @@ int transfer_acquire_instance(Transfer *t, Instance *i, TransferProgress cb, voi
                         return log_oom();
         }
 
+        _cleanup_strv_free_ char **cmd = NULL, **instances_args = NULL;
+        FOREACH_ARRAY(inst, t->target.instances, t->target.n_instances) {
+                r = strv_extend_many(&instances_args, "--instance", instance_get_path(*inst));
+                if (r < 0)
+                        return log_oom();
+        }
+
         switch (i->resource->type) { /* Source */
 
         case RESOURCE_REGULAR_FILE:
@@ -1286,25 +1293,26 @@ int transfer_acquire_instance(Transfer *t, Instance *i, TransferProgress cb, voi
                 case RESOURCE_REGULAR_FILE:
 
                         /* url file → regular file */
-
-                        r = run_callout("(sd-pull-raw)",
-                                       STRV_MAKE(
+                        r = strv_extend_many(&cmd,
                                                SYSTEMD_PULL_PATH,
                                                "raw",
                                                "--direct",          /* just download the specified URL, don't download anything else */
                                                "--verify", digest,  /* validate by explicit SHA256 sum */
                                                arg_sync ? "--sync=yes" : "--sync=no",
                                                i->path,
-                                               t->temporary_path),
+                                               t->temporary_path);
+                        if (r < 0)
+                                return log_oom();
+                        strv_extend_strv_concat(&cmd, (const char* const*) instances_args, "");
+
+                        r = run_callout("(sd-pull-raw)", cmd,
                                         t, i, cb, userdata);
                         break;
 
                 case RESOURCE_PARTITION:
 
                         /* url file → partition */
-
-                        r = run_callout("(sd-pull-raw)",
-                                        STRV_MAKE(
+                        cmd = strv_new(
                                                SYSTEMD_PULL_PATH,
                                                "raw",
                                                "--direct",              /* just download the specified URL, don't download anything else */
@@ -1313,7 +1321,10 @@ int transfer_acquire_instance(Transfer *t, Instance *i, TransferProgress cb, voi
                                                "--size-max", max_size,
                                                arg_sync ? "--sync=yes" : "--sync=no",
                                                i->path,
-                                               t->target.path),
+                                               t->target.path);
+                        strv_extend_strv_concat(&cmd, (const char* const*) instances_args, "");
+
+                        r = run_callout("(sd-pull-raw)", cmd,
                                         t, i, cb, userdata);
                         break;
 
@@ -1326,8 +1337,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, TransferProgress cb, voi
         case RESOURCE_URL_TAR:
                 assert(IN_SET(t->target.type, RESOURCE_DIRECTORY, RESOURCE_SUBVOLUME));
 
-                r = run_callout("(sd-pull-tar)",
-                                STRV_MAKE(
+                cmd = strv_new(
                                        SYSTEMD_PULL_PATH,
                                        "tar",
                                        "--direct",          /* just download the specified URL, don't download anything else */
@@ -1335,7 +1345,10 @@ int transfer_acquire_instance(Transfer *t, Instance *i, TransferProgress cb, voi
                                        t->target.type == RESOURCE_SUBVOLUME ? "--btrfs-subvol=yes" : "--btrfs-subvol=no",
                                        arg_sync ? "--sync=yes" : "--sync=no",
                                        i->path,
-                                       t->temporary_path),
+                                       t->temporary_path);
+                strv_extend_strv_concat(&cmd, (const char* const*) instances_args, "");
+
+                r = run_callout("(sd-pull-tar)", cmd,
                                 t, i, cb, userdata);
                 break;
 

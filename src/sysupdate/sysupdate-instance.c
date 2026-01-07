@@ -49,6 +49,11 @@ int instance_new(
         return 0;
 }
 
+char *instance_get_path(Instance *i) {
+        assert(i);
+        return i->path;
+}
+
 Instance *instance_free(Instance *i) {
         if (!i)
                 return NULL;

@@ -814,7 +814,8 @@ int raw_pull_start(
                 uint64_t size_max,
                 ImportFlags flags,
                 ImportVerify verify,
-                const struct iovec *checksum) {
+                const struct iovec *checksum,
+                sd_json_variant *instances) {
 
         int r;
 
@@ -880,6 +881,9 @@ int raw_pull_start(
                 //if (r < 0)
                 //        return r;
         }
+
+        if (instances != NULL)
+                p->raw_job->instances = TAKE_PTR (instances);
 
         r = pull_make_verification_jobs(
                         &p->checksum_job,
