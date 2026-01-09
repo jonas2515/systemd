@@ -4,6 +4,7 @@
 #include "shared-forward.h"
 #include "import-common.h"
 #include "import-util.h"
+#include "pull-worker-varlink.h"
 
 typedef struct TarPull TarPull;
 
@@ -14,4 +15,4 @@ TarPull* tar_pull_unref(TarPull *p);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(TarPull*, tar_pull_unref);
 
-int tar_pull_start(TarPull *p, const char *url, const char *local, ImportFlags flags, ImportVerify verify, const struct iovec *checksum, sd_json_variant *instances);
+int tar_pull_start(TarPull *p, const char *url, const char *local, ImportFlags flags, ImportVerify verify, const struct iovec *checksum, PullInstance *instances, size_t n_instances);

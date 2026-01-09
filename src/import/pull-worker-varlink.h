@@ -25,6 +25,12 @@ typedef enum PullJobState {
 
 #define PULL_JOB_IS_COMPLETE(j) (IN_SET((j)->state, PULL_JOB_DONE, PULL_JOB_FAILED))
 
+typedef struct {
+        uint64_t offset, size;
+        int fd;
+        char *path;
+} PullInstance;
+
 typedef struct PullJob {
         PullJobState state;
         int error;
@@ -69,7 +75,8 @@ typedef struct PullJob {
         bool sync;
         bool force_memory;
 
-        sd_json_variant *instances;
+        PullInstance *instances;
+        size_t n_instances;
 } PullJob;
 
 int pull_job_new(PullJob **ret, const char *url, void *userdata);

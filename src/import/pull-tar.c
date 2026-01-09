@@ -19,7 +19,6 @@
 #include "pretty-print.h"
 #include "process-util.h"
 #include "pull-common.h"
-#include "pull-worker-varlink.h"
 #include "pull-tar.h"
 #include "ratelimit.h"
 #include "rm-rf.h"
@@ -677,7 +676,8 @@ int tar_pull_start(
                 ImportFlags flags,
                 ImportVerify verify,
                 const struct iovec *checksum,
-                sd_json_variant *instances) {
+                PullInstance *instances,
+                size_t n_instances) {
 
         int r;
 
@@ -727,8 +727,16 @@ int tar_pull_start(
                 //        return r;
         }
 
-        if (instances != NULL)
-                p->tar_job->instances = TAKE_PTR(instances);
+        if (instances != NULL) {
+                FOREACH_ARRAY (instance, instances, n_instances) {
+                        instance->fd = open(instance->path, O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+                        if (instance->fd < 0)
+                                return log_error_errno(errno, "Failed to open instance '%s': %m", instance->path);
+                }
+
+                p->tar_job->instances = instances;
+                p->tar_job->n_instances = n_instances;
+        }
 
         /* Set up download of checksum/signature files */
         r = pull_make_verification_jobs(

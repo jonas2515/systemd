@@ -17,7 +17,6 @@
 #include "mkdir-label.h"
 #include "path-util.h"
 #include "pull-common.h"
-#include "pull-worker-varlink.h"
 #include "pull-raw.h"
 #include "qcow2-util.h"
 #include "sd-varlink.h"
@@ -815,7 +814,8 @@ int raw_pull_start(
                 ImportFlags flags,
                 ImportVerify verify,
                 const struct iovec *checksum,
-                sd_json_variant *instances) {
+                PullInstance *instances,
+                size_t n_instances) {
 
         int r;
 
@@ -882,8 +882,16 @@ int raw_pull_start(
                 //        return r;
         }
 
-        if (instances != NULL)
-                p->raw_job->instances = TAKE_PTR (instances);
+        if (instances != NULL) {
+                FOREACH_ARRAY (instance, instances, n_instances) {
+                        instance->fd = open(instance->path, O_RDONLY|O_NOCTTY|O_CLOEXEC, 0664);
+                        if (instance->fd < 0)
+                                return log_error_errno(errno, "Failed to open instance '%s': %m", instance->path);
+                }
+
+                p->raw_job->instances = instances;
+                p->raw_job->n_instances = n_instances;
+        }
 
         r = pull_make_verification_jobs(
                         &p->checksum_job,

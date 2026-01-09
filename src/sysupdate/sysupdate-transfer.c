@@ -1199,9 +1199,19 @@ int transfer_acquire_instance(Transfer *t, Instance *i, TransferProgress cb, voi
 
         _cleanup_strv_free_ char **cmd = NULL, **instances_args = NULL;
         FOREACH_ARRAY(inst, t->target.instances, t->target.n_instances) {
-                r = strv_extend_many(&instances_args, "--instance", instance_get_path(*inst));
-                if (r < 0)
-                        return log_oom();
+                if (t->target.type == RESOURCE_PARTITION) {
+                        _cleanup_free_ char *instance_arg;
+                        r = asprintf(&instance_arg, "%s:%" PRIu64 ":%" PRIu64, t->target.path, (*inst)->partition_info.start, (*inst)->partition_info.size);
+                        if (r < 0)
+                                return log_oom();
+                        r = strv_extend_many(&instances_args, "--instance", instance_arg);
+                        if (r < 0)
+                                return log_oom();
+                } else {
+                        r = strv_extend_many(&instances_args, "--instance", (*inst)->path);
+                        if (r < 0)
+                                return log_oom();
+                }
         }
 
         switch (i->resource->type) { /* Source */

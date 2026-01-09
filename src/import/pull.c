@@ -23,10 +23,11 @@
 #include "path-util.h"
 #include "pull-raw.h"
 #include "pull-tar.h"
+#include "pull-worker-varlink.h"
 #include "runtime-scope.h"
-#include "sd-json.h"
 #include "signal-util.h"
 #include "string-util.h"
+#include "strv.h"
 #include "verbs.h"
 #include "web-util.h"
 
@@ -37,11 +38,19 @@ static uint64_t arg_offset = UINT64_MAX, arg_size_max = UINT64_MAX;
 static struct iovec arg_checksum = {};
 static ImageClass arg_class = IMAGE_MACHINE;
 static RuntimeScope arg_runtime_scope = _RUNTIME_SCOPE_INVALID;
-static sd_json_variant *arg_instances_array = NULL;
+static PullInstance *arg_instances = NULL;
+static size_t n_instances = 0;
 
-STATIC_DESTRUCTOR_REGISTER(arg_instances_array, sd_json_variant_unrefp);
 STATIC_DESTRUCTOR_REGISTER(arg_checksum, iovec_done);
 STATIC_DESTRUCTOR_REGISTER(arg_image_root, freep);
+
+static void instances_freep(PullInstance **inst) {
+        FOREACH_ARRAY(instance, arg_instances, n_instances) {
+                freep(&instance->path);
+        }
+        freep(&arg_instances);
+}
+STATIC_DESTRUCTOR_REGISTER(arg_instances, instances_freep);
 
 static int normalize_local(const char *local, const char *url, char **ret) {
         _cleanup_free_ char *ll = NULL;
@@ -167,7 +176,8 @@ static int pull_tar(int argc, char *argv[], void *userdata) {
                         arg_import_flags & IMPORT_PULL_FLAGS_MASK_TAR,
                         arg_verify,
                         &arg_checksum,
-                        TAKE_PTR(arg_instances_array));
+                        arg_instances,
+                        n_instances);
         if (r < 0)
                 return log_error_errno(r, "Failed to pull image: %m");
 
@@ -237,7 +247,8 @@ static int pull_raw(int argc, char *argv[], void *userdata) {
                         arg_import_flags & IMPORT_PULL_FLAGS_MASK_RAW,
                         arg_verify,
                         &arg_checksum,
-                        TAKE_PTR(arg_instances_array));
+                        arg_instances,
+                        n_instances);
         if (r < 0)
                 return log_error_errno(r, "Failed to pull image: %m");
 
@@ -285,7 +296,10 @@ static int help(int argc, char *argv[], void *userdata) {
                "                              around\n"
                "     --system                 Operate in per-system mode\n"
                "     --user                   Operate in per-user mode\n"
-               "     --instance=PATH          pass instance to the backend read-only",
+               "     --instance=PATH\n"
+               "     --instance=PATH:BYTES:BYTES\n"
+               "                              pass instance with optionally size and offset\n"
+               "                              to the backend read-only\n",
                program_invocation_short_name,
                ansi_underline(),
                ansi_normal(),
@@ -533,15 +547,44 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_runtime_scope = RUNTIME_SCOPE_USER;
                         break;
 
-                case ARG_INSTANCE:
-                        _cleanup_free_ char *tmp = NULL;
-                        r = parse_path_argument(optarg, /* suppress_root= */ false, &tmp);
-                        r = sd_json_variant_append_arraybo(
-                                &arg_instances_array,
-                                SD_JSON_BUILD_PAIR_STRING("location", tmp));
+                case ARG_INSTANCE: {
+                        _cleanup_strv_free_ char **splitted = strv_split(optarg, ":");
+                        uint64_t u;
+                        PullInstance instance = {
+                                .offset = UINT64_MAX,
+                                .size = UINT64_MAX,
+                                .fd = -EBADF,
+                                .path = NULL
+                        };
+
+                        if (strv_length(splitted) != 1 && strv_length(splitted) != 3) {
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too many times ':' in --instance= argument: %s", optarg);
+                        }
+
+                        r = parse_path_argument(splitted[0], /* suppress_root= */ false, &instance.path);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse --instance= argument: %s", optarg);
+                                return log_error_errno(r, "Failed to parse path in --instance= argument: %s", splitted[0]);
+
+                        if (strv_length(splitted) == 3) {
+                                r = parse_size(splitted[1], 1024, &u);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse size in --instance= argument: %s", splitted[1]);
+                                if (!FILE_SIZE_VALID(u))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Size argument to --instance= switch too large: %s", splitted[1]);
+                                instance.size = u;
+
+                                r = safe_atou64(splitted[2], &u);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse offset in --instance= argument: %s", splitted[2]);
+                                if (!FILE_SIZE_VALID(u))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Offset argument to --instance= switch too large: %s", splitted[2]);
+                                instance.offset = u;
+                        }
+
+                        if (!GREEDY_REALLOC_APPEND (arg_instances, n_instances, &instance, 1))
+                                return log_oom_debug();
                         break;
+                }
 
                 case '?':
                         return -EINVAL;

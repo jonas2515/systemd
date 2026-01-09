@@ -52,7 +52,6 @@ struct Instance {
 void instance_metadata_destroy(InstanceMetadata *m);
 
 int instance_new(Resource *rr, const char *path, const InstanceMetadata *f, Instance **ret);
-char *instance_get_path(Instance *i);
 Instance *instance_free(Instance *i);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Instance*, instance_free);

@@ -4,6 +4,7 @@
 #include "shared-forward.h"
 #include "import-common.h"
 #include "import-util.h"
+#include "pull-worker-varlink.h"
 
 typedef struct RawPull RawPull;
 
@@ -14,4 +15,4 @@ RawPull* raw_pull_unref(RawPull *p);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(RawPull*, raw_pull_unref);
 
-int raw_pull_start(RawPull *p, const char *url, const char *local, uint64_t offset, uint64_t size_max, ImportFlags flags, ImportVerify verify, const struct iovec *checksum, sd_json_variant *instances);
+int raw_pull_start(RawPull *p, const char *url, const char *local, uint64_t offset, uint64_t size_max, ImportFlags flags, ImportVerify verify, const struct iovec *checksum, PullInstance *instances, size_t n_instances);

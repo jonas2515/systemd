@@ -9,7 +9,9 @@
 static SD_VARLINK_DEFINE_STRUCT_TYPE(
                 PullInstance,
                 SD_VARLINK_FIELD_COMMENT("Path to the location of the instance on the system"),
-                SD_VARLINK_DEFINE_FIELD(location, SD_VARLINK_STRING, 0));
+                SD_VARLINK_DEFINE_FIELD(locationFileDescriptor, SD_VARLINK_INT, 0),
+                SD_VARLINK_DEFINE_FIELD(offset, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
+                SD_VARLINK_DEFINE_FIELD(maxSize, SD_VARLINK_INT, SD_VARLINK_NULLABLE));
 
 static SD_VARLINK_DEFINE_METHOD(
                 PullFile,

@@ -62,6 +62,21 @@ int pull_file_job_begin(PullJob *j) {
         if (destination_fd_index < 0)
                 return log_error_errno(destination_fd_index, "Failed to push destination fd into varlink socket: %m");
 
+        sd_json_variant *instances_array = NULL;
+        FOREACH_ARRAY(instance, j->instances, j->n_instances) {
+                int instance_fd_index = sd_varlink_push_fd(pull_link, TAKE_FD(instance->fd));
+                if (instance_fd_index < 0)
+                        return log_error_errno(instance_fd_index, "Failed to push instance fd into varlink socket: %m");
+
+                r = sd_json_variant_append_arraybo(
+                        &instances_array,
+                        SD_JSON_BUILD_PAIR_UNSIGNED("locationFileDescriptor", instance_fd_index),
+                        SD_JSON_BUILD_PAIR_CONDITION(instance->offset != UINT64_MAX, "offset", SD_JSON_BUILD_UNSIGNED (instance->offset)),
+                        SD_JSON_BUILD_PAIR_CONDITION(instance->size != UINT64_MAX, "maxSize", SD_JSON_BUILD_UNSIGNED (instance->size)));
+                if (r < 0)
+                        return r;
+        }
+
         const char *error_id = NULL;
         r = varlink_callbo_and_log(
                 pull_link,
@@ -71,9 +86,11 @@ int pull_file_job_begin(PullJob *j) {
                 SD_JSON_BUILD_PAIR_CONDITION(iovec_is_set(&j->expected_checksum), "expectedChecksum", SD_JSON_BUILD_STRING (hexmem(j->expected_checksum.iov_base, j->expected_checksum.iov_len))),
                 SD_JSON_BUILD_PAIR_STRING("source", j->url),
                 SD_JSON_BUILD_PAIR_UNSIGNED("destinationFileDescriptor", destination_fd_index),
-                SD_JSON_BUILD_PAIR_CONDITION(j->instances != NULL, "instances", SD_JSON_BUILD_VARIANT(j->instances)),
+                SD_JSON_BUILD_PAIR_CONDITION(j->instances != NULL, "instances", SD_JSON_BUILD_VARIANT(instances_array)),
                 SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->offset), "offset", SD_JSON_BUILD_UNSIGNED(j->offset)),
                 SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->uncompressed_max), "maxSize", SD_JSON_BUILD_UNSIGNED(j->uncompressed_max)));
+        if (r < 0)
+                return r;
 
         pull_job_finish(j, 0);
 
@@ -103,8 +120,6 @@ PullJob* pull_job_unref(PullJob *j) {
         iovec_done(&j->payload);
         iovec_done(&j->checksum);
         iovec_done(&j->expected_checksum);
-
-        sd_json_variant_unref (j->instances);
 
         return mfree(j);
 }
@@ -163,6 +178,7 @@ int pull_job_new(
                 .sync = true,
                 .expected_content_length = UINT64_MAX,
                 .instances = NULL,
+                .n_instances = 0
         };
 
         *ret = TAKE_PTR(j);
