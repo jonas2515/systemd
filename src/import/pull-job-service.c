@@ -26,6 +26,7 @@ typedef struct MethodPullParameters {
         struct iovec checksum;
         sd_event *event;
         PullJob *job;
+        char **old_etags;
 } MethodPullParameters;
 
 MethodPullParameters parameters;
@@ -86,6 +87,7 @@ static int pull_file(void) {
         parameters.job->sync = false; //do on the caller side
 
         parameters.job->disk_fd = parameters.destination_fd;
+        parameters.job->old_etags = TAKE_PTR(parameters.old_etags);
 
         r = pull_job_begin(parameters.job);
         if (r < 0)
@@ -130,6 +132,7 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
                 { "offset",                    SD_JSON_VARIANT_NUMBER,        sd_json_dispatch_uint64,       offsetof(MethodPullParameters, offset),               0 },
                 { "maxSize",                   SD_JSON_VARIANT_NUMBER,        sd_json_dispatch_uint64,       offsetof(MethodPullParameters, size_max),             0 },
                 { "expectedChecksum",          SD_JSON_VARIANT_STRING,        sd_json_dispatch_string,       offsetof(MethodPullParameters, expected_checksum),    0 },
+                { "oldEtags",                  SD_JSON_VARIANT_ARRAY,         sd_json_dispatch_strv,         offsetof(MethodPullParameters, old_etags),            0 },
                 {}
         };
 
@@ -139,6 +142,7 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
                 .offset = UINT64_MAX,
                 .size_max = UINT64_MAX,
                 .expected_checksum = NULL,
+                .old_etags = NULL,
         };
         int r;
 
@@ -174,11 +178,9 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
         if (r < 0)
                 return sd_varlink_error(link, "io.systemd.PullJob.PullError", NULL);
 
-        _cleanup_free_ char *h = hexmem(parameters.job->checksum.iov_base, parameters.job->checksum.iov_len);
-        if (!h)
-                r = log_oom();
-
-        return sd_varlink_reply(link, NULL);
+        return sd_varlink_replybo(link,
+                                  SD_JSON_BUILD_PAIR_BOOLEAN("etagExists", parameters.job->etag_exists),
+                                  SD_JSON_BUILD_PAIR_CONDITION(parameters.job->etag != NULL, "etag", SD_JSON_BUILD_STRING(parameters.job->etag)));
 }
 
 static int vl_server(void) {

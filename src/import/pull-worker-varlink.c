@@ -79,19 +79,43 @@ int pull_file_job_begin(PullJob *j) {
         }
 
         const char *error_id = NULL;
+        sd_json_variant *reply = NULL, *d = NULL;
         r = varlink_callbo_and_log(
                 pull_link,
                 "io.systemd.PullJob.PullFile",
-                NULL,
+                &reply,
                 &error_id,
                 SD_JSON_BUILD_PAIR_CONDITION(iovec_is_set(&j->expected_checksum), "expectedChecksum", SD_JSON_BUILD_STRING (hexmem(j->expected_checksum.iov_base, j->expected_checksum.iov_len))),
                 SD_JSON_BUILD_PAIR_STRING("source", j->url),
                 SD_JSON_BUILD_PAIR_UNSIGNED("destinationFileDescriptor", destination_fd_index),
                 SD_JSON_BUILD_PAIR_CONDITION(j->instances != NULL, "instances", SD_JSON_BUILD_VARIANT(instances_array)),
                 SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->offset), "offset", SD_JSON_BUILD_UNSIGNED(j->offset)),
-                SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->uncompressed_max), "maxSize", SD_JSON_BUILD_UNSIGNED(j->uncompressed_max)));
+                SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->uncompressed_max), "maxSize", SD_JSON_BUILD_UNSIGNED(j->uncompressed_max)),
+                SD_JSON_BUILD_PAIR_CONDITION(j->old_etags != NULL, "oldEtags", SD_JSON_BUILD_STRV(j->old_etags)));
         if (r < 0)
                 return r;
+
+        d = sd_json_variant_by_key(reply, "etagExists");
+        if (!d)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response is missing 'etagExists' key.");
+
+        if (!sd_json_variant_is_boolean(d))
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response 'etagExists' field not a boolean");
+
+        j->etag_exists = sd_json_variant_boolean(d);
+
+        d = sd_json_variant_by_key(reply, "etag");
+        if (d && !sd_json_variant_is_null(d)) {
+                if (!sd_json_variant_is_string(d))
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                               "PullFile() response 'etag' field not a string");
+
+                j->etag = strdup(sd_json_variant_string(d));
+                if (!j->etag)
+                        return log_oom();
+        }
 
         pull_job_finish(j, 0);
 

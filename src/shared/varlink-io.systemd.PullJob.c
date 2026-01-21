@@ -25,7 +25,14 @@ static SD_VARLINK_DEFINE_METHOD(
                 SD_VARLINK_DEFINE_INPUT(offset, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("Maximum size of written data"),
                 SD_VARLINK_DEFINE_INPUT(maxSize, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
-                SD_VARLINK_DEFINE_INPUT(expectedChecksum, SD_VARLINK_STRING, SD_VARLINK_NULLABLE));
+                SD_VARLINK_FIELD_COMMENT("Expected Checksum of downloaded data"),
+                SD_VARLINK_DEFINE_INPUT(expectedChecksum, SD_VARLINK_STRING, SD_VARLINK_NULLABLE),
+                SD_VARLINK_FIELD_COMMENT("Etags of previously downloaded data"),
+                SD_VARLINK_DEFINE_INPUT(oldEtags, SD_VARLINK_STRING, SD_VARLINK_ARRAY|SD_VARLINK_NULLABLE),
+                SD_VARLINK_FIELD_COMMENT("Etag of newly downloaded data"),
+                SD_VARLINK_DEFINE_OUTPUT(etag, SD_VARLINK_STRING, SD_VARLINK_NULLABLE),
+                SD_VARLINK_FIELD_COMMENT("If an existing Etag matches the Etag of the data to download"),
+                SD_VARLINK_DEFINE_OUTPUT(etagExists, SD_VARLINK_BOOL, 0));
 
 static SD_VARLINK_DEFINE_ERROR(InvalidParameters);
 static SD_VARLINK_DEFINE_ERROR(PullError);
