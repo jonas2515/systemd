@@ -45,8 +45,7 @@ PullJob* pull_job_unref(PullJob *j) {
 
         pull_job_close_disk_fd(j);
 
-        if (j->glue)
-                curl_glue_remove_and_free(j->glue, j->curl);
+        curl_glue_remove_and_free(j->glue, j->curl);
         curl_slist_free_all(j->request_header);
 
         import_compress_free(&j->compress);
@@ -64,7 +63,7 @@ PullJob* pull_job_unref(PullJob *j) {
         return mfree(j);
 }
 
-void pull_job_finish(PullJob *j, int ret) {
+static void pull_job_finish(PullJob *j, int ret) {
         assert(j);
 
         if (IN_SET(j->state, PULL_JOB_DONE, PULL_JOB_FAILED))
@@ -106,8 +105,7 @@ static int pull_job_restart(PullJob *j, const char *new_url) {
         iovec_done(&j->expected_checksum);
         j->expected_content_length = UINT64_MAX;
 
-        if (j->glue)
-                curl_glue_remove_and_free(j->glue, j->curl);
+        curl_glue_remove_and_free(j->glue, j->curl);
         j->curl = NULL;
 
         curl_slist_free_all(j->request_header);
@@ -693,7 +691,7 @@ int pull_job_new(
         _cleanup_free_ char *u = NULL;
 
         assert(url);
-        //assert(glue);
+        assert(glue);
         assert(ret);
 
         u = strdup(url);

@@ -93,6 +93,4 @@ void pull_job_curl_on_finished(CurlGlue *g, CURL *curl, CURLcode result);
 
 void pull_job_close_disk_fd(PullJob *j);
 
-void pull_job_finish(PullJob *j, int ret);
-
 DEFINE_TRIVIAL_CLEANUP_FUNC(PullJob*, pull_job_unref);

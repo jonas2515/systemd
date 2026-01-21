@@ -342,6 +342,8 @@ static int verify_one(PullJob *checksum_job, PullJob *job) {
                 return 0;
         if (job->error != 0)
                 return 0;
+        if (job->etag_exists)
+                return 0;
 
         assert(job->calc_checksum);
         assert(iovec_is_set(&job->checksum));
