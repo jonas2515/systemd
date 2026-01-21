@@ -59,7 +59,7 @@ int pull_file_job_begin(PullJob *j) {
 
         j->on_open_disk(j);
 
-        int destination_fd_index = sd_varlink_push_fd(pull_link, TAKE_FD(j->disk_fd));
+        int destination_fd_index = sd_varlink_push_dup_fd(pull_link, j->disk_fd);
         if (destination_fd_index < 0)
                 return log_error_errno(destination_fd_index, "Failed to push destination fd into varlink socket: %m");
 
