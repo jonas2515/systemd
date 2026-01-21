@@ -280,7 +280,7 @@ static int raw_pull_determine_path(
 
         assert(p->raw_job);
 
-        r = pull_make_path(p->raw_job->url, NULL, p->image_root, ".raw-", suffix, field);
+        r = pull_make_path(p->raw_job->url, p->raw_job->etag, p->image_root, ".raw-", suffix, field);
         if (r < 0)
                 return log_oom();
 
@@ -344,7 +344,7 @@ static int raw_pull_make_local_copy(RawPull *p) {
         if (!p->local)
                 return 0;
 
-        if (false) { //p->raw_job->etag_exists) {
+        if (p->raw_job->etag_exists) {
                 /* We have downloaded this one previously, reopen it */
 
                 assert(p->raw_job->disk_fd < 0);
@@ -568,7 +568,7 @@ static void raw_pull_job_on_finished(PullJob *j) {
         FOREACH_ARGUMENT(jj, p->settings_job, p->roothash_job, p->roothash_signature_job, p->verity_job)
                 pull_job_close_disk_fd(jj);
 
-        if (true) { //disable etags for now TODO //!p->raw_job->etag_exists) {
+        if (!p->raw_job->etag_exists) {
                 raw_pull_report_progress(p, RAW_VERIFYING);
 
                 r = pull_verify(p->verify,
@@ -606,7 +606,7 @@ static void raw_pull_job_on_finished(PullJob *j) {
                 if (r < 0)
                         goto finish;
 
-                if (true) { //!p->raw_job->etag_exists) {
+                if (!p->raw_job->etag_exists) {
                         /* This is a new download, verify it, and move it into place */
 
                         assert(p->temp_path);
@@ -877,9 +877,9 @@ int raw_pull_start(
                 p->raw_job->offset = p->offset = offset;
 
         if (!FLAGS_SET(flags, IMPORT_DIRECT)) {
-                //r = pull_find_old_etags(url, p->image_root, DT_REG, ".raw-", ".raw", &p->raw_job->old_etags);
-                //if (r < 0)
-                //        return r;
+                r = pull_find_old_etags(url, p->image_root, DT_REG, ".raw-", ".raw", &p->raw_job->old_etags);
+                if (r < 0)
+                        return r;
         }
 
         if (instances != NULL) {

@@ -11,6 +11,7 @@
 #include "pull-worker-varlink.h"
 #include "sd-varlink.h"
 #include "string-util.h"
+#include "strv.h"
 #include "varlink-util.h"
 
 static int url_get_protocol(const char *url, const char **protocol) {
@@ -117,6 +118,8 @@ PullJob* pull_job_unref(PullJob *j) {
                 EVP_MD_CTX_free(j->checksum_ctx);
 
         free(j->url);
+        free(j->etag);
+        strv_free(j->old_etags);
         iovec_done(&j->payload);
         iovec_done(&j->checksum);
         iovec_done(&j->expected_checksum);

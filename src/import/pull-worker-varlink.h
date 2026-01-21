@@ -44,6 +44,10 @@ typedef struct PullJob {
         PullJobProgress on_progress;
         PullJobNotFound on_not_found;
 
+        char *etag;
+        char **old_etags;
+        bool etag_exists;
+
         uint64_t content_length;
         uint64_t written_compressed;
         uint64_t written_uncompressed;

@@ -224,7 +224,7 @@ static int tar_pull_determine_path(
 
         assert(p->tar_job);
 
-        r = pull_make_path(p->tar_job->url, NULL, p->image_root, ".tar-", suffix, field);
+        r = pull_make_path(p->tar_job->url, p->tar_job->etag, p->image_root, ".tar-", suffix, field);
         if (r < 0)
                 return log_oom();
 
@@ -451,7 +451,7 @@ static void tar_pull_job_on_finished(PullJob *j) {
                 }
         }
 
-        if (true) { // !p->tar_job->etag_exists) {
+        if (!p->tar_job->etag_exists) {
                 /* This is a new download, verify it, and move it into place */
 
                 tar_pull_report_progress(p, TAR_VERIFYING);
@@ -494,7 +494,7 @@ static void tar_pull_job_on_finished(PullJob *j) {
                 if (r < 0)
                         goto finish;
 
-                if (true) { // !p->tar_job->etag_exists) {
+                if (!p->tar_job->etag_exists) {
                         /* This is a new download, verify it, and move it into place */
 
                         assert(p->temp_path);
@@ -722,9 +722,9 @@ int tar_pull_start(
                 p->tar_job->calc_checksum = verify != IMPORT_VERIFY_NO;
 
         if (!FLAGS_SET(flags, IMPORT_DIRECT)) {
-                //r = pull_find_old_etags(url, p->image_root, DT_DIR, ".tar-", NULL, &p->tar_job->old_etags);
-                //if (r < 0)
-                //        return r;
+                r = pull_find_old_etags(url, p->image_root, DT_DIR, ".tar-", NULL, &p->tar_job->old_etags);
+                if (r < 0)
+                        return r;
         }
 
         if (instances != NULL) {
