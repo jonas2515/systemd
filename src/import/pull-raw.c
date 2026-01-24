@@ -492,7 +492,7 @@ static int raw_pull_rename_auxiliary_file(
         return 1;
 }
 
-static void raw_pull_job_on_finished(PullJob *j) {
+static int raw_pull_job_on_finished(PullJob *j) {
         int r;
 
         assert(j);
@@ -533,7 +533,7 @@ static void raw_pull_job_on_finished(PullJob *j) {
          * We only do something when we got all files */
 
         if (!raw_pull_is_done(p))
-                return;
+                return 0;
 
         if (p->signature_job && p->signature_job->error != 0) {
                 VerificationStyle style;
@@ -674,6 +674,8 @@ finish:
                 p->on_finished(p, r, p->userdata);
         else
                 sd_event_exit(p->event, r);
+
+        return r;
 }
 
 static int raw_pull_job_on_open_disk_generic(

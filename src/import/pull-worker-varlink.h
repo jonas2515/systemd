@@ -5,7 +5,7 @@
 
 typedef struct PullJob PullJob;
 
-typedef void (*PullJobFinished)(PullJob *job);
+typedef int (*PullJobFinished)(PullJob *job);
 typedef int (*PullJobOpenDisk)(PullJob *job);
 typedef int (*PullJobHeader)(PullJob *job, const char *header, size_t sz);
 typedef void (*PullJobProgress)(PullJob *job);
@@ -88,7 +88,7 @@ PullJob* pull_job_unref(PullJob *job);
 
 void pull_job_close_disk_fd(PullJob *j);
 
-void pull_job_finish(PullJob *j, int ret);
+int pull_job_finish(PullJob *j, int ret);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(PullJob*, pull_job_unref);
 

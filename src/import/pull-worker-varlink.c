@@ -93,7 +93,7 @@ int pull_file_job_begin(PullJob *j) {
                 SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->uncompressed_max), "maxSize", SD_JSON_BUILD_UNSIGNED(j->uncompressed_max)),
                 SD_JSON_BUILD_PAIR_CONDITION(j->old_etags != NULL, "oldEtags", SD_JSON_BUILD_STRV(j->old_etags)));
         if (r < 0)
-                return r;
+                return pull_job_finish(j, r);
 
         d = sd_json_variant_by_key(reply, "etagExists");
         if (!d)
@@ -117,9 +117,7 @@ int pull_file_job_begin(PullJob *j) {
                         return log_oom();
         }
 
-        pull_job_finish(j, 0);
-
-        return r;
+        return pull_job_finish(j, 0);
 }
 
 void pull_job_close_disk_fd(PullJob *j) {
@@ -151,11 +149,11 @@ PullJob* pull_job_unref(PullJob *j) {
         return mfree(j);
 }
 
-void pull_job_finish(PullJob *j, int ret) {
+int pull_job_finish(PullJob *j, int ret) {
         assert(j);
 
         if (IN_SET(j->state, PULL_JOB_DONE, PULL_JOB_FAILED))
-                return;
+                return 0;
 
         if (ret == 0) {
                 j->state = PULL_JOB_DONE;
@@ -167,7 +165,9 @@ void pull_job_finish(PullJob *j, int ret) {
         }
 
         if (j->on_finished)
-                j->on_finished(j);
+                return j->on_finished(j);
+        else
+                return 0;
 }
 
 #include "time-util.h"
