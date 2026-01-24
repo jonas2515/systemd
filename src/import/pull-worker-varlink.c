@@ -117,6 +117,19 @@ int pull_file_job_begin(PullJob *j) {
                         return log_oom();
         }
 
+        d = sd_json_variant_by_key(reply, "checksum");
+        if (!d)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response is missing 'checksum' key.");
+
+        if (!sd_json_variant_is_string(d))
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response 'checksum' field not a string");
+
+        r = sd_json_variant_unhex (d, &j->checksum.iov_base, &j->checksum.iov_len);
+        if (r < 0)
+                return r;
+
         return pull_job_finish(j, 0);
 }
 

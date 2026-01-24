@@ -32,7 +32,9 @@ static SD_VARLINK_DEFINE_METHOD(
                 SD_VARLINK_FIELD_COMMENT("Etag of newly downloaded data"),
                 SD_VARLINK_DEFINE_OUTPUT(etag, SD_VARLINK_STRING, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("If an existing Etag matches the Etag of the data to download"),
-                SD_VARLINK_DEFINE_OUTPUT(etagExists, SD_VARLINK_BOOL, 0));
+                SD_VARLINK_DEFINE_OUTPUT(etagExists, SD_VARLINK_BOOL, 0),
+                SD_VARLINK_FIELD_COMMENT("Computed checksum of downloaded data"),
+                SD_VARLINK_DEFINE_OUTPUT(checksum, SD_VARLINK_STRING, SD_VARLINK_NULLABLE)      );
 
 SD_VARLINK_DEFINE_INTERFACE(
                 io_systemd_PullJob,

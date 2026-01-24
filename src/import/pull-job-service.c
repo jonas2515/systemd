@@ -75,7 +75,7 @@ static int pull_file(void) {
 
         parameters.job->on_finished = pull_job_on_finished;
         //pull_job->on_open_disk = pull_job_on_open_disk;
-        parameters.job->calc_checksum = parameters.expected_checksum != NULL;
+        parameters.job->calc_checksum = true;
         parameters.job->force_memory = false;
 
         if (parameters.size_max != UINT64_MAX)
@@ -182,7 +182,8 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
 
         return sd_varlink_replybo(link,
                                   SD_JSON_BUILD_PAIR_BOOLEAN("etagExists", parameters.job->etag_exists),
-                                  SD_JSON_BUILD_PAIR_CONDITION(parameters.job->etag != NULL, "etag", SD_JSON_BUILD_STRING(parameters.job->etag)));
+                                  SD_JSON_BUILD_PAIR_CONDITION(parameters.job->etag != NULL, "etag", SD_JSON_BUILD_STRING(parameters.job->etag)),
+                                  SD_JSON_BUILD_PAIR_STRING("checksum", hexmem(parameters.job->checksum.iov_base, parameters.job->checksum.iov_len)));
 }
 
 static int vl_server(void) {
