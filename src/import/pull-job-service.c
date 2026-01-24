@@ -154,29 +154,31 @@ static int vl_method_pull_file(sd_varlink *link, sd_json_variant *json_parameter
 
         parameters.destination_fd = sd_varlink_take_fd(link, parameters.destination_fd_index);
         if (parameters.destination_fd < 0)
-                return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameters", NULL);
+                return sd_varlink_error_invalid_parameter_name(link, "destinationFileDescriptor");
 
         if (parameters.offset != UINT64_MAX && !FILE_SIZE_VALID(parameters.offset))
-                return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameters", NULL);
+                return sd_varlink_error_invalid_parameter_name(link, "offset");
 
         if (parameters.size_max != UINT64_MAX && (!FILE_SIZE_VALID(parameters.size_max) || (parameters.size_max % 1024) != 0))
-                return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameters", NULL);
+                return sd_varlink_error_invalid_parameter_name(link, "maxSize");
 
         /* Make sure offset+size is still in the valid range if both set */
         if (parameters.offset != UINT64_MAX && parameters.size_max != UINT64_MAX &&
             ((parameters.size_max > (UINT64_MAX - parameters.offset)) ||
-             !FILE_SIZE_VALID(parameters.offset + parameters.size_max)))
-                return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameters", NULL);
+             !FILE_SIZE_VALID(parameters.offset + parameters.size_max))) {
+                log_error("maxSize and offset are invalid together");
+                return sd_varlink_error_invalid_parameter_name(link, "maxSize");
+       }
 
         if (parameters.expected_checksum) {
                 r = parse_checksum(parameters.expected_checksum, &parameters.checksum);
                 if (r < 0)
-                        return sd_varlink_error(link, "io.systemd.PullJob.InvalidParameter", NULL);
+                        return sd_varlink_error_invalid_parameter_name(link, "expectedChecksum");
         }
 
         r = pull_file();
         if (r < 0)
-                return sd_varlink_error(link, "io.systemd.PullJob.PullError", NULL);
+                return sd_varlink_error_errno(link, parameters.job->error);
 
         return sd_varlink_replybo(link,
                                   SD_JSON_BUILD_PAIR_BOOLEAN("etagExists", parameters.job->etag_exists),

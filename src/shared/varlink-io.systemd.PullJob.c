@@ -34,9 +34,6 @@ static SD_VARLINK_DEFINE_METHOD(
                 SD_VARLINK_FIELD_COMMENT("If an existing Etag matches the Etag of the data to download"),
                 SD_VARLINK_DEFINE_OUTPUT(etagExists, SD_VARLINK_BOOL, 0));
 
-static SD_VARLINK_DEFINE_ERROR(InvalidParameters);
-static SD_VARLINK_DEFINE_ERROR(PullError);
-
 SD_VARLINK_DEFINE_INTERFACE(
                 io_systemd_PullJob,
                 "io.systemd.PullJob",
@@ -44,8 +41,4 @@ SD_VARLINK_DEFINE_INTERFACE(
                 SD_VARLINK_SYMBOL_COMMENT("Instances to reuse data from for delta-updating"),
                 &vl_type_PullInstance,
                 SD_VARLINK_SYMBOL_COMMENT("Download from a URL into your system"),
-                &vl_method_PullFile,
-                SD_VARLINK_SYMBOL_COMMENT("A parameter is invalid"),
-                &vl_error_InvalidParameters,
-                SD_VARLINK_SYMBOL_COMMENT("An error occured while pulling the data"),
-                &vl_error_PullError);
+                &vl_method_PullFile);
