@@ -14,6 +14,7 @@
 #include "install-file.h"
 #include "io-util.h"
 #include "log.h"
+#include "memfd-util.h"
 #include "mkdir-label.h"
 #include "path-util.h"
 #include "pull-common.h"
@@ -71,7 +72,6 @@ typedef struct RawPull {
         char *verity_path;
         char *verity_temp_path;
 
-        char *checksum_temp_path;
         char *signature_temp_path;
 } RawPull;
 
@@ -94,7 +94,6 @@ RawPull* raw_pull_unref(RawPull *p) {
         unlink_and_free(p->roothash_temp_path);
         unlink_and_free(p->roothash_signature_temp_path);
         unlink_and_free(p->verity_temp_path);
-        unlink_and_free(p->checksum_temp_path);
         unlink_and_free(p->signature_temp_path);
 
         free(p->final_path);
@@ -812,7 +811,11 @@ static int raw_pull_job_on_open_disk_checksum(PullJob *j) {
         p = j->userdata;
         assert(p->checksum_job == j);
 
-        return raw_pull_job_on_open_disk_generic(p, j, "checksum", &p->checksum_temp_path);
+        j->disk_fd = memfd_new("sd-pull-checksum");
+        if (j->disk_fd < 0)
+                return log_error_errno(errno, "Failed to create checksum memfd: %m");
+
+        return 0;
 }
 
 static int raw_pull_job_on_open_disk_signature(PullJob *j) {

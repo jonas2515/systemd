@@ -342,11 +342,11 @@ int pull_make_verification_jobs(
         return 0;
 }
 
-static int verify_one(PullJob *checksum_job, PullJob *job) {
+static int verify_one(const char *checksum_text, size_t checksum_size, PullJob *job) {
         _cleanup_free_ char *fn = NULL;
         int r;
 
-        assert(checksum_job);
+        assert(checksum_text);
 
         if (!job)
                 return 0;
@@ -391,8 +391,8 @@ static int verify_one(PullJob *checksum_job, PullJob *job) {
                 if (!line)
                         return log_oom();
 
-                p = memmem_safe(checksum_job->payload.iov_base,
-                                checksum_job->payload.iov_len,
+                p = memmem_safe(checksum_text,
+                                checksum_size,
                                 line,
                                 strlen(line));
                 if (p)
@@ -400,7 +400,7 @@ static int verify_one(PullJob *checksum_job, PullJob *job) {
         }
 
         /* Only counts if found at beginning of a line */
-        if (!p || (p != (char*) checksum_job->payload.iov_base && p[-1] != '\n'))
+        if (!p || (p != checksum_text && p[-1] != '\n'))
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                        "DOWNLOAD INVALID: Checksum of %s file did not check out, file has been tampered with.", fn);
 
@@ -561,18 +561,33 @@ int pull_verify(ImportVerify verify,
                 log_debug("Main download is a checksum file, can't validate its checksum with itself, skipping.");
                 verify_job = main_job;
         } else {
+
                 assert(main_job->calc_checksum);
                 assert(iovec_is_set(&main_job->checksum));
                 assert(checksum_job);
                 assert(checksum_job->state == PULL_JOB_DONE);
+                assert(checksum_job->disk_fd);
 
-                if (!iovec_is_set(&checksum_job->payload))
+                if (lseek(checksum_job->disk_fd, 0, SEEK_SET) < 0)
+                        return log_error_errno(errno, "Failed to seek to beginning of checksum memfd: %m");
+
+                _cleanup_fclose_ FILE *f = take_fdopen(&checksum_job->disk_fd, "r");
+                if (!f)
+                        return log_error_errno(errno, "Failed to reopen checksum memfd: %m");
+
+                _cleanup_free_ char *text = NULL;
+                size_t text_size = 0;
+                r = read_full_stream(f, &text, &text_size);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to read from checksum: %m");
+
+                if (!text || text_size <= 0)
                         return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                                "Checksum is empty, cannot verify.");
 
                 PullJob *j;
                 FOREACH_ARGUMENT(j, main_job, settings_job, roothash_job, roothash_signature_job, verity_job) {
-                        r = verify_one(checksum_job, j);
+                        r = verify_one(text, text_size, j);
                         if (r < 0)
                                 return r;
                 }
