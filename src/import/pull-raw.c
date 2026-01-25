@@ -352,7 +352,9 @@ static int raw_pull_make_local_copy(RawPull *p) {
         if (p->raw_job->etag_exists) {
                 /* We have downloaded this one previously, reopen it */
 
-                assert(p->raw_job->disk_fd < 0);
+                /* disk_fd was not used */
+                if (p->raw_job->disk_fd >= 0)
+                        safe_close (p->raw_job->disk_fd);
 
                 p->raw_job->disk_fd = open(p->final_path, O_RDONLY|O_NOCTTY|O_CLOEXEC);
                 if (p->raw_job->disk_fd < 0)
