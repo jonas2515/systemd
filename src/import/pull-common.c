@@ -244,6 +244,8 @@ static SignatureStyle signature_style_from_filename(const char *fn) {
 int pull_make_verification_jobs(
                 PullJob **ret_checksum_job,
                 PullJob **ret_signature_job,
+                PullJobOpenDisk on_open_disk_checksum,
+                PullJobOpenDisk on_open_disk_signature,
                 ImportVerify verify,
                 const char *url,
                 PullJobFinished on_finished,
@@ -255,6 +257,8 @@ int pull_make_verification_jobs(
 
         assert(ret_checksum_job);
         assert(ret_signature_job);
+        assert(on_open_disk_checksum);
+        assert(on_open_disk_signature);
         assert(verify == _IMPORT_VERIFY_INVALID || verify < _IMPORT_VERIFY_MAX);
         assert(verify == _IMPORT_VERIFY_INVALID || verify >= 0);
         assert(url);
@@ -289,12 +293,18 @@ int pull_make_verification_jobs(
                 if (r < 0)
                         return r;
 
-                r = pull_job_new(&checksum_job, checksum_url, userdata);
+                r = pull_make_auxiliary_job (
+                                             &checksum_job,
+                                             checksum_url,
+                                             raw_strip_suffixes,
+                                             "",
+                                             IMPORT_VERIFY_NO,
+                                             on_open_disk_checksum,
+                                             on_finished,
+                                             userdata);
                 if (r < 0)
                         return r;
 
-                checksum_job->on_finished = on_finished;
-                checksum_job->uncompressed_max = checksum_job->compressed_max = 1ULL * 1024ULL * 1024ULL;
                 checksum_job->on_not_found = pull_job_restart_with_sha256sum; /* if this fails, look for ubuntu-style checksum */
         }
 
@@ -312,12 +322,18 @@ int pull_make_verification_jobs(
                 if (r < 0)
                         return r;
 
-                r = pull_job_new(&signature_job, signature_url, userdata);
+                r = pull_make_auxiliary_job (
+                                             &signature_job,
+                                             signature_url,
+                                             raw_strip_suffixes,
+                                             "",
+                                             IMPORT_VERIFY_NO,
+                                             on_open_disk_signature,
+                                             on_finished,
+                                             userdata);
                 if (r < 0)
                         return r;
 
-                signature_job->on_finished = on_finished;
-                signature_job->uncompressed_max = signature_job->compressed_max = 1ULL * 1024ULL * 1024ULL;
                 signature_job->on_not_found = pull_job_restart_with_signature;
         }
 

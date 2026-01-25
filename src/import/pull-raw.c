@@ -70,6 +70,9 @@ typedef struct RawPull {
 
         char *verity_path;
         char *verity_temp_path;
+
+        char *checksum_temp_path;
+        char *signature_temp_path;
 } RawPull;
 
 RawPull* raw_pull_unref(RawPull *p) {
@@ -91,6 +94,8 @@ RawPull* raw_pull_unref(RawPull *p) {
         unlink_and_free(p->roothash_temp_path);
         unlink_and_free(p->roothash_signature_temp_path);
         unlink_and_free(p->verity_temp_path);
+        unlink_and_free(p->checksum_temp_path);
+        unlink_and_free(p->signature_temp_path);
 
         free(p->final_path);
         free(p->settings_path);
@@ -796,6 +801,30 @@ static int raw_pull_job_on_open_disk_verity(PullJob *j) {
         return raw_pull_job_on_open_disk_generic(p, j, "verity", &p->verity_temp_path);
 }
 
+static int raw_pull_job_on_open_disk_checksum(PullJob *j) {
+        RawPull *p;
+
+        assert(j);
+        assert(j->userdata);
+
+        p = j->userdata;
+        assert(p->checksum_job == j);
+
+        return raw_pull_job_on_open_disk_generic(p, j, "checksum", &p->checksum_temp_path);
+}
+
+static int raw_pull_job_on_open_disk_signature(PullJob *j) {
+        RawPull *p;
+
+        assert(j);
+        assert(j->userdata);
+
+        p = j->userdata;
+        assert(p->signature_job == j);
+
+        return raw_pull_job_on_open_disk_generic(p, j, "signature", &p->signature_temp_path);
+}
+
 static void raw_pull_job_on_progress(PullJob *j) {
         RawPull *p;
 
@@ -898,6 +927,8 @@ int raw_pull_start(
         r = pull_make_verification_jobs(
                         &p->checksum_job,
                         &p->signature_job,
+                        raw_pull_job_on_open_disk_checksum,
+                        raw_pull_job_on_open_disk_signature,
                         verify,
                         url,
                         raw_pull_job_on_finished,
