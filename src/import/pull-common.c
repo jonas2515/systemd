@@ -409,41 +409,39 @@ static int verify_one(const char *checksum_text, size_t checksum_size, PullJob *
 }
 
 static int verify_gpg(
-                const struct iovec *payload,
-                const struct iovec *signature) {
+                      const char *verify_text,
+                      size_t verify_text_size,
+                      const char *signature_text,
+                      size_t signature_text_size) {
 
         _cleanup_close_pair_ int gpg_pipe[2] = EBADF_PAIR;
         _cleanup_(rm_rf_physical_and_freep) char *gpg_home = NULL;
-        char sig_file_path[] = "/tmp/sigXXXXXX";
+        _cleanup_(unlink_tempfilep) char sig_file_path[] = "/tmp/sigXXXXXX";
         _cleanup_(sigkill_waitp) pid_t pid = 0;
         int r;
 
-        assert(iovec_is_valid(payload));
-        assert(iovec_is_valid(signature));
+        assert(verify_text);
+        assert(signature_text);
 
         r = pipe2(gpg_pipe, O_CLOEXEC);
         if (r < 0)
                 return log_error_errno(errno, "Failed to create pipe for gpg: %m");
 
-        if (iovec_is_set(signature)) {
+        {
                 _cleanup_close_ int sig_file = -EBADF;
 
                 sig_file = mkostemp(sig_file_path, O_RDWR);
                 if (sig_file < 0)
                         return log_error_errno(errno, "Failed to create temporary file: %m");
 
-                r = loop_write(sig_file, signature->iov_base, signature->iov_len);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to write to temporary file: %m");
-                        goto finish;
-                }
+                r = loop_write(sig_file, signature_text, signature_text_size);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to write to temporary file: %m");
         }
 
         r = mkdtemp_malloc("/tmp/gpghomeXXXXXX", &gpg_home);
-        if (r < 0) {
-                log_error_errno(r, "Failed to create temporary home for gpg: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to create temporary home for gpg: %m");
 
         r = safe_fork_full("(gpg)",
                            (int[]) { gpg_pipe[0], -EBADF, STDERR_FILENO },
@@ -484,11 +482,9 @@ static int verify_gpg(
                         cmd[k++] = "--keyring=" VENDOR_KEYRING_PATH;
 
                 cmd[k++] = "--verify";
-                if (signature) {
-                        cmd[k++] = sig_file_path;
-                        cmd[k++] = "-";
-                        cmd[k++] = NULL;
-                }
+                cmd[k++] = sig_file_path;
+                cmd[k++] = "-";
+                cmd[k++] = NULL;
 
                 execvp("gpg2", (char * const *) cmd);
                 execvp("gpg", (char * const *) cmd);
@@ -498,32 +494,21 @@ static int verify_gpg(
 
         gpg_pipe[0] = safe_close(gpg_pipe[0]);
 
-        if (iovec_is_set(payload)) {
-                r = loop_write(gpg_pipe[1], payload->iov_base, payload->iov_len);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to write to pipe: %m");
-                        goto finish;
-                }
-        }
+        r = loop_write(gpg_pipe[1], verify_text, verify_text_size);
+        if (r < 0)
+                return log_error_errno(r, "Failed to write to pipe: %m");
 
         gpg_pipe[1] = safe_close(gpg_pipe[1]);
 
         r = wait_for_terminate_and_check("gpg", TAKE_PID(pid), WAIT_LOG_ABNORMAL);
         if (r < 0)
-                goto finish;
+                return r;
         if (r != EXIT_SUCCESS)
-                r = log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                     "DOWNLOAD INVALID: Signature verification failed.");
-        else {
-                log_info("Signature verification succeeded.");
-                r = 0;
-        }
 
-finish:
-        if (iovec_is_set(signature))
-                (void) unlink(sig_file_path);
-
-        return r;
+        log_info("Signature verification succeeded.");
+        return 0;
 }
 
 int pull_verify(ImportVerify verify,
@@ -538,6 +523,8 @@ int pull_verify(ImportVerify verify,
         _cleanup_free_ char *fn = NULL;
         VerificationStyle style;
         PullJob *verify_job;
+        _cleanup_free_ char *signature_text = NULL, *verify_text = NULL;
+        size_t signature_text_size = 0, verify_text_size = 0;
         int r;
 
         assert(verify == _IMPORT_VERIFY_INVALID || verify < _IMPORT_VERIFY_MAX);
@@ -568,31 +555,27 @@ int pull_verify(ImportVerify verify,
                 assert(checksum_job->state == PULL_JOB_DONE);
                 assert(checksum_job->disk_fd);
 
-                if (lseek(checksum_job->disk_fd, 0, SEEK_SET) < 0)
-                        return log_error_errno(errno, "Failed to seek to beginning of checksum memfd: %m");
+                verify_job = checksum_job;
+        }
 
-                _cleanup_fclose_ FILE *f = take_fdopen(&checksum_job->disk_fd, "r");
-                if (!f)
-                        return log_error_errno(errno, "Failed to reopen checksum memfd: %m");
+        if (lseek(verify_job->disk_fd, 0, SEEK_SET) < 0)
+                return log_error_errno(errno, "Failed to seek to beginning of file to verify: %m");
 
-                _cleanup_free_ char *text = NULL;
-                size_t text_size = 0;
-                r = read_full_stream(f, &text, &text_size);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to read from checksum: %m");
+        r = read_full_file_at(verify_job->disk_fd, NULL, &verify_text, &verify_text_size);
+        if (r < 0)
+                return log_error_errno(r, "Failed to read file to verify: %m");
 
-                if (!text || text_size <= 0)
-                        return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
-                                               "Checksum is empty, cannot verify.");
+        if (!verify_text || verify_text_size <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "File is empty, cannot verify.");
 
+        if (!is_checksum_file(fn)) {
                 PullJob *j;
                 FOREACH_ARGUMENT(j, main_job, settings_job, roothash_job, roothash_signature_job, verity_job) {
-                        r = verify_one(text, text_size, j);
+                        r = verify_one(verify_text, verify_text_size, j);
                         if (r < 0)
                                 return r;
                 }
-
-                verify_job = checksum_job;
         }
 
         if (verify != IMPORT_VERIFY_SIGNATURE)
@@ -607,11 +590,18 @@ int pull_verify(ImportVerify verify,
         assert(signature_job);
         assert(signature_job->state == PULL_JOB_DONE);
 
-        if (!iovec_is_set(&signature_job->payload))
+        if (lseek(checksum_job->disk_fd, 0, SEEK_SET) < 0)
+                return log_error_errno(errno, "Failed to seek to beginning of checksum memfd: %m");
+
+        r = read_full_file_at(checksum_job->disk_fd, NULL, &signature_text, &signature_text_size);
+        if (r < 0)
+                return log_error_errno(r, "Failed to read signature file: %m");
+
+        if (!signature_text || signature_text_size <= 0)
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                        "Signature is empty, cannot verify.");
 
-        return verify_gpg(&verify_job->payload, &signature_job->payload);
+        return verify_gpg(verify_text, verify_text_size, signature_text, signature_text_size);
 }
 
 int verification_style_from_url(const char *url, VerificationStyle *ret) {
