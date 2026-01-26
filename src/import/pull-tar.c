@@ -640,38 +640,9 @@ static int tar_pull_job_on_open_disk_tar(PullJob *j) {
         return 0;
 }
 
-static int tar_pull_job_on_open_disk_generic(
-                TarPull *p,
-                PullJob *j,
-                const char *extra,
-                char **temp_path /* input + output */) {
-
-        int r;
-
-        assert(p);
-        assert(j);
-        assert(extra);
-        assert(temp_path);
-
-        assert(!FLAGS_SET(p->flags, IMPORT_DIRECT));
-
-        if (!*temp_path) {
-                r = tempfn_random_child(p->image_root, extra, temp_path);
-                if (r < 0)
-                        return log_oom();
-        }
-
-        (void) mkdir_parents_label(*temp_path, 0700);
-
-        j->disk_fd = open(*temp_path, O_RDWR|O_CREAT|O_EXCL|O_NOCTTY|O_CLOEXEC, 0664);
-        if (j->disk_fd < 0)
-                return log_error_errno(errno, "Failed to create %s: %m", *temp_path);
-
-        return 0;
-}
-
 static int tar_pull_job_on_open_disk_settings(PullJob *j) {
         TarPull *p;
+        int r;
 
         assert(j);
         assert(j->userdata);
@@ -679,31 +650,19 @@ static int tar_pull_job_on_open_disk_settings(PullJob *j) {
         p = j->userdata;
         assert(p->settings_job == j);
 
-        return tar_pull_job_on_open_disk_generic(p, j, "settings", &p->settings_temp_path);
-}
+        if (!p->settings_temp_path) {
+                r = tempfn_random_child(p->image_root, "settings", &p->settings_temp_path);
+                if (r < 0)
+                        return log_oom();
+        }
 
-static int tar_pull_job_on_open_disk_checksum(PullJob *j) {
-        TarPull *p;
+        (void) mkdir_parents_label(p->settings_temp_path, 0700);
 
-        assert(j);
-        assert(j->userdata);
+        j->disk_fd = open(p->settings_temp_path, O_RDWR|O_CREAT|O_EXCL|O_NOCTTY|O_CLOEXEC, 0664);
+        if (j->disk_fd < 0)
+                return log_error_errno(errno, "Failed to create %s: %m", p->settings_temp_path);
 
-        p = j->userdata;
-        assert(p->checksum_job == j);
-
-        return tar_pull_job_on_open_disk_generic(p, j, "checksum", &p->checksum_temp_path);
-}
-
-static int tar_pull_job_on_open_disk_signature(PullJob *j) {
-        TarPull *p;
-
-        assert(j);
-        assert(j->userdata);
-
-        p = j->userdata;
-        assert(p->signature_job == j);
-
-        return tar_pull_job_on_open_disk_generic(p, j, "signature", &p->signature_temp_path);
+        return 0;
 }
 
 static void tar_pull_job_on_progress(PullJob *j) {
@@ -790,8 +749,6 @@ int tar_pull_start(
         r = pull_make_verification_jobs(
                         &p->checksum_job,
                         &p->signature_job,
-                        tar_pull_job_on_open_disk_checksum,
-                        tar_pull_job_on_open_disk_signature,
                         verify,
                         url,
                         tar_pull_job_on_finished,

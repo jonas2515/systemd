@@ -9,6 +9,7 @@
 #include "hexdecoct.h"
 #include "io-util.h"
 #include "log.h"
+#include "memfd-util.h"
 #include "memory-util.h"
 #include "os-util.h"
 #include "path-util.h"
@@ -241,11 +242,31 @@ static SignatureStyle signature_style_from_filename(const char *fn) {
         return _SIGNATURE_STYLE_INVALID;
 }
 
+static int pull_job_on_open_disk_checksum(PullJob *j) {
+        assert(j);
+        assert(j->userdata);
+
+        j->disk_fd = memfd_new("sd-pull-checksum");
+        if (j->disk_fd < 0)
+                return log_error_errno(errno, "Failed to create checksum memfd: %m");
+
+        return 0;
+}
+
+static int pull_job_on_open_disk_signature(PullJob *j) {
+        assert(j);
+        assert(j->userdata);
+
+        j->disk_fd = memfd_new("sd-pull-signature");
+        if (j->disk_fd < 0)
+                return log_error_errno(errno, "Failed to create signature memfd: %m");
+
+        return 0;
+}
+
 int pull_make_verification_jobs(
                 PullJob **ret_checksum_job,
                 PullJob **ret_signature_job,
-                PullJobOpenDisk on_open_disk_checksum,
-                PullJobOpenDisk on_open_disk_signature,
                 ImportVerify verify,
                 const char *url,
                 PullJobFinished on_finished,
@@ -257,8 +278,6 @@ int pull_make_verification_jobs(
 
         assert(ret_checksum_job);
         assert(ret_signature_job);
-        assert(on_open_disk_checksum);
-        assert(on_open_disk_signature);
         assert(verify == _IMPORT_VERIFY_INVALID || verify < _IMPORT_VERIFY_MAX);
         assert(verify == _IMPORT_VERIFY_INVALID || verify >= 0);
         assert(url);
@@ -299,7 +318,7 @@ int pull_make_verification_jobs(
                                              raw_strip_suffixes,
                                              "",
                                              IMPORT_VERIFY_NO,
-                                             on_open_disk_checksum,
+                                             pull_job_on_open_disk_checksum,
                                              on_finished,
                                              userdata);
                 if (r < 0)
@@ -328,7 +347,7 @@ int pull_make_verification_jobs(
                                              raw_strip_suffixes,
                                              "",
                                              IMPORT_VERIFY_NO,
-                                             on_open_disk_signature,
+                                             pull_job_on_open_disk_signature,
                                              on_finished,
                                              userdata);
                 if (r < 0)

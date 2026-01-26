@@ -36,8 +36,6 @@ int pull_make_auxiliary_job(
 int pull_make_verification_jobs(
                 PullJob **ret_checksum_job,
                 PullJob **ret_signature_job,
-                PullJobOpenDisk on_open_disk_checksum,
-                PullJobOpenDisk on_open_disk_signature,
                 ImportVerify verify,
                 const char *url,
                 PullJobFinished on_finished,
