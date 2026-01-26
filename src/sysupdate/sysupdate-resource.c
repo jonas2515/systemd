@@ -17,6 +17,7 @@
 #include "fdisk-util.h"
 #include "fileio.h"
 #include "find-esp.h"
+#include "fs-util.h"
 #include "glyph-util.h"
 #include "gpt.h"
 #include "hexdecoct.h"
@@ -31,6 +32,7 @@
 #include "sysupdate-pattern.h"
 #include "sysupdate-resource.h"
 #include "time-util.h"
+#include "tmpfile-util.h"
 #include "utf8.h"
 
 void resource_destroy(Resource *rr) {
@@ -270,9 +272,10 @@ static int download_manifest(
                 char **ret_buffer,
                 size_t *ret_size) {
 
-        _cleanup_free_ char *buffer = NULL, *suffixed_url = NULL;
-        _cleanup_close_pair_ int pfd[2] = EBADF_PAIR;
+        _cleanup_free_ char *buffer = NULL, *suffixed_url = NULL, *pattern = NULL;
         _cleanup_fclose_ FILE *manifest = NULL;
+        _cleanup_(unlink_and_freep) char *temp = NULL;
+        const char *vt;
         size_t size = 0;
         pid_t pid;
         int r;
@@ -287,14 +290,23 @@ static int download_manifest(
         if (r < 0)
                 return log_error_errno(r, "Failed to append SHA256SUMS to URL: %m");
 
-        if (pipe2(pfd, O_CLOEXEC) < 0)
-                return log_error_errno(errno, "Failed to allocate pipe: %m");
+        r = var_tmp_dir(&vt);
+        if (r < 0)
+                return log_error_errno(r, "Could not determine temporary directory: %m");
+
+        pattern = path_join(vt, "sysupdate-SHA256SUMS-XXXXXX");
+        if (!pattern)
+                return log_oom();
+
+        r = tempfn_random(pattern, NULL, &temp);
+        if (r < 0)
+                return log_error_errno(r, "Failed to create temporary file path: %m");
 
         log_info("%s Acquiring manifest file %s%s", glyph(GLYPH_DOWNLOAD),
                  suffixed_url, glyph(GLYPH_ELLIPSIS));
 
         r = safe_fork_full("(sd-pull)",
-                           (int[]) { -EBADF, pfd[1], STDERR_FILENO },
+                           (int[]) { -EBADF, -EBADF, STDERR_FILENO },
                            NULL, 0,
                            FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_LOG,
                            &pid);
@@ -309,7 +321,7 @@ static int download_manifest(
                         "--direct",                        /* just download the specified URL, don't download anything else */
                         "--verify", verify_signature ? "signature" : "no", /* verify the manifest file */
                         suffixed_url,
-                        "-",                               /* write to stdout */
+                        temp,
                         NULL
                 };
 
@@ -318,30 +330,20 @@ static int download_manifest(
                 _exit(EXIT_FAILURE);
         };
 
-        pfd[1] = safe_close(pfd[1]);
-
         /* We'll first load the entire manifest into memory before parsing it. That's because the
          * systemd-pull tool can validate the download only after its completion, but still pass the data to
          * us as it runs. We thus need to check the return value of the process *before* parsing, to be
          * reasonably safe. */
-
-        manifest = fdopen(pfd[0], "r");
-        if (!manifest)
-                return log_error_errno(errno, "Failed to allocate FILE object for manifest file: %m");
-
-        TAKE_FD(pfd[0]);
-
-        r = read_full_stream(manifest, &buffer, &size);
-        if (r < 0)
-                return log_error_errno(r, "Failed to read manifest file from child: %m");
-
-        manifest = safe_fclose(manifest);
 
         r = wait_for_terminate_and_check("(sd-pull)", pid, WAIT_LOG);
         if (r < 0)
                 return r;
         if (r != 0)
                 return -EPROTO;
+
+        r = read_full_file(temp, &buffer, &size);
+        if (r < 0)
+                return log_error_errno(r, "Failed to read manifest file: %m");
 
         *ret_buffer = TAKE_PTR(buffer);
         *ret_size = size;
