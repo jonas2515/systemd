@@ -137,8 +137,7 @@ void pull_job_close_disk_fd(PullJob *j) {
         if (!j)
                 return;
 
-        if (j->close_disk_fd)
-                safe_close(j->disk_fd);
+        safe_close(j->disk_fd);
 
         j->disk_fd = -EBADF;
 }
@@ -149,13 +148,9 @@ PullJob* pull_job_unref(PullJob *j) {
 
         pull_job_close_disk_fd(j);
 
-        if (j->checksum_ctx)
-                EVP_MD_CTX_free(j->checksum_ctx);
-
         free(j->url);
         free(j->etag);
         strv_free(j->old_etags);
-        iovec_done(&j->payload);
         iovec_done(&j->checksum);
         iovec_done(&j->expected_checksum);
 
@@ -207,16 +202,11 @@ int pull_job_new(
         *j = (PullJob) {
                 .state = PULL_JOB_INIT,
                 .disk_fd = -EBADF,
-                .close_disk_fd = true,
                 .userdata = userdata,
-                .content_length = UINT64_MAX,
-                .start_usec = now(CLOCK_MONOTONIC),
-                .compressed_max = 64LLU * 1024LLU * 1024LLU * 1024LLU, /* 64GB safety limit */
                 .uncompressed_max = 64LLU * 1024LLU * 1024LLU * 1024LLU, /* 64GB safety limit */
                 .url = TAKE_PTR(u),
                 .offset = UINT64_MAX,
                 .sync = true,
-                .expected_content_length = UINT64_MAX,
                 .instances = NULL,
                 .n_instances = 0
         };

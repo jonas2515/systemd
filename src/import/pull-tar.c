@@ -61,9 +61,6 @@ typedef struct TarPull {
         char *settings_path;
         char *settings_temp_path;
 
-        char *checksum_temp_path;
-        char *signature_temp_path;
-
         int tree_fd;
         int userns_fd;
 
@@ -89,8 +86,6 @@ TarPull* tar_pull_unref(TarPull *p) {
                 free(p->temp_path);
         }
         unlink_and_free(p->settings_temp_path);
-        unlink_and_free(p->checksum_temp_path);
-        unlink_and_free(p->signature_temp_path);
 
         free(p->final_path);
         free(p->settings_path);
@@ -723,10 +718,7 @@ int tar_pull_start(
         if (iovec_is_set(checksum)) {
                 if (!iovec_memdup(checksum, &p->tar_job->expected_checksum))
                         return -ENOMEM;
-
-                p->tar_job->calc_checksum = true;
-        } else
-                p->tar_job->calc_checksum = verify != IMPORT_VERIFY_NO;
+        }
 
         if (!FLAGS_SET(flags, IMPORT_DIRECT)) {
                 r = pull_find_old_etags(url, p->image_root, DT_DIR, ".tar-", NULL, &p->tar_job->old_etags);
@@ -734,16 +726,9 @@ int tar_pull_start(
                         return r;
         }
 
-        if (instances != NULL) {
-                FOREACH_ARRAY (instance, instances, n_instances) {
-                        instance->fd = open(instance->path, O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
-                        if (instance->fd < 0)
-                                return log_error_errno(errno, "Failed to open instance '%s': %m", instance->path);
-                }
-
-                p->tar_job->instances = instances;
-                p->tar_job->n_instances = n_instances;
-        }
+        r = pull_job_open_instances(p->tar_job, instances, n_instances);
+        if (r < 0)
+                return r;
 
         /* Set up download of checksum/signature files */
         r = pull_make_verification_jobs(

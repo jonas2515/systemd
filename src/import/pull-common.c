@@ -205,8 +205,7 @@ int pull_make_auxiliary_job(
 
         job->on_open_disk = on_open_disk;
         job->on_finished = on_finished;
-        job->compressed_max = job->uncompressed_max = 1ULL * 1024ULL * 1024ULL;
-        job->calc_checksum = IN_SET(verify, IMPORT_VERIFY_CHECKSUM, IMPORT_VERIFY_SIGNATURE);
+        job->uncompressed_max = 1ULL * 1024ULL * 1024ULL;
 
         *ret = TAKE_PTR(job);
         return 0;
@@ -324,7 +323,7 @@ int pull_make_verification_jobs(
                 if (r < 0)
                         return r;
 
-                checksum_job->on_not_found = pull_job_restart_with_sha256sum; /* if this fails, look for ubuntu-style checksum */
+                //checksum_job->on_not_found = pull_job_restart_with_sha256sum; /* if this fails, look for ubuntu-style checksum */
         }
 
         if (verify == IMPORT_VERIFY_SIGNATURE && signature_style_from_filename(fn) < 0) {
@@ -346,14 +345,14 @@ int pull_make_verification_jobs(
                                              signature_url,
                                              raw_strip_suffixes,
                                              "",
-                                             IMPORT_VERIFY_NO,
+                                             verify,
                                              pull_job_on_open_disk_signature,
                                              on_finished,
                                              userdata);
                 if (r < 0)
                         return r;
 
-                signature_job->on_not_found = pull_job_restart_with_signature;
+                //signature_job->on_not_found = pull_job_restart_with_signature;
         }
 
         *ret_checksum_job = TAKE_PTR(checksum_job);
@@ -380,7 +379,6 @@ static int verify_one(const char *checksum_text, size_t checksum_size, PullJob *
         if (job->etag_exists)
                 return 0;
 
-        assert(job->calc_checksum);
         assert(iovec_is_set(&job->checksum));
 
         r = import_url_last_component(job->url, &fn);
@@ -568,7 +566,6 @@ int pull_verify(ImportVerify verify,
                 verify_job = main_job;
         } else {
 
-                assert(main_job->calc_checksum);
                 assert(iovec_is_set(&main_job->checksum));
                 assert(checksum_job);
                 assert(checksum_job->state == PULL_JOB_DONE);
@@ -756,6 +753,20 @@ int pull_job_restart_with_signature(PullJob *j, char **ret) {
         }
 
         return 1;
+}
+
+int pull_job_open_instances(PullJob *job, PullInstance *instances, size_t n_instances) {
+        if (instances != NULL) {
+                FOREACH_ARRAY (instance, instances, n_instances) {
+                        instance->fd = open(instance->path, O_RDONLY|O_NOCTTY|O_CLOEXEC, 0664);
+                        if (instance->fd < 0)
+                                return log_error_errno(errno, "Failed to open instance '%s': %m", instance->path);
+                }
+
+                job->instances = instances;
+                job->n_instances = n_instances;
+        }
+        return 0;
 }
 
 bool pull_validate_local(const char *name, ImportFlags flags) {

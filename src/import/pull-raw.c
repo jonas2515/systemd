@@ -70,8 +70,6 @@ typedef struct RawPull {
 
         char *verity_path;
         char *verity_temp_path;
-
-        char *signature_temp_path;
 } RawPull;
 
 RawPull* raw_pull_unref(RawPull *p) {
@@ -93,7 +91,6 @@ RawPull* raw_pull_unref(RawPull *p) {
         unlink_and_free(p->roothash_temp_path);
         unlink_and_free(p->roothash_signature_temp_path);
         unlink_and_free(p->verity_temp_path);
-        unlink_and_free(p->signature_temp_path);
 
         free(p->final_path);
         free(p->settings_path);
@@ -235,7 +232,6 @@ static int raw_pull_maybe_convert_qcow2(RawPull *p) {
                 return 0;
 
         assert(p->final_path);
-        assert(p->raw_job->close_disk_fd);
 
         r = qcow2_detect(p->raw_job->disk_fd);
         if (r < 0)
@@ -343,6 +339,7 @@ static int raw_pull_make_local_copy(RawPull *p) {
         assert(p);
         assert(p->raw_job);
         assert(!FLAGS_SET(p->flags, IMPORT_DIRECT));
+        assert(p->raw_job->disk_fd >= 0);
 
         if (!p->local)
                 return 0;
@@ -351,8 +348,7 @@ static int raw_pull_make_local_copy(RawPull *p) {
                 /* We have downloaded this one previously, reopen it */
 
                 /* disk_fd was not used */
-                if (p->raw_job->disk_fd >= 0)
-                        safe_close (p->raw_job->disk_fd);
+                safe_close (p->raw_job->disk_fd);
 
                 p->raw_job->disk_fd = open(p->final_path, O_RDONLY|O_NOCTTY|O_CLOEXEC);
                 if (p->raw_job->disk_fd < 0)
@@ -360,7 +356,6 @@ static int raw_pull_make_local_copy(RawPull *p) {
         } else {
                 /* We freshly downloaded the image, use it */
 
-                assert(p->raw_job->disk_fd >= 0);
                 assert(p->offset == UINT64_MAX);
 
                 if (lseek(p->raw_job->disk_fd, 0, SEEK_SET) < 0)
@@ -726,12 +721,6 @@ static int raw_pull_job_on_open_disk_raw(PullJob *j) {
 
         if (p->flags & IMPORT_DIRECT) {
 
-                if (!p->local) { /* If no local name specified, the pull job will write its data to stdout */
-                        j->disk_fd = STDOUT_FILENO;
-                        j->close_disk_fd = false;
-                        return 0;
-                }
-
                 (void) mkdir_parents_label(p->local, 0700);
 
                 j->disk_fd = open(p->local, O_RDWR|O_NOCTTY|O_CLOEXEC|(p->offset == UINT64_MAX ? O_TRUNC|O_CREAT : 0), 0664);
@@ -835,11 +824,12 @@ int raw_pull_start(
         assert(offset == UINT64_MAX || FLAGS_SET(flags, IMPORT_DIRECT));
         assert(!(flags & (IMPORT_PULL_SETTINGS|IMPORT_PULL_ROOTHASH|IMPORT_PULL_ROOTHASH_SIGNATURE|IMPORT_PULL_VERITY)) || !(flags & IMPORT_DIRECT));
         assert(!(flags & (IMPORT_PULL_SETTINGS|IMPORT_PULL_ROOTHASH|IMPORT_PULL_ROOTHASH_SIGNATURE|IMPORT_PULL_VERITY)) || !iovec_is_set(checksum));
+        assert(local);
 
         if (!http_url_is_valid(url) && !file_url_is_valid(url))
                 return -EINVAL;
 
-        if (local && !pull_validate_local(local, flags))
+        if (!pull_validate_local(local, flags))
                 return -EINVAL;
 
         if (p->raw_job)
@@ -864,18 +854,6 @@ int raw_pull_start(
                 if (!iovec_memdup(checksum, &p->raw_job->expected_checksum))
                         return -ENOMEM;
 
-                p->raw_job->calc_checksum = true;
-        } else if (verify != IMPORT_VERIFY_NO) {
-                /* Calculate checksum of the main download unless the users asks for a SHA256SUM file or its
-                 * signature, which we let gpg verify instead. */
-
-                r = pull_url_needs_checksum(url);
-                if (r < 0)
-                        return r;
-
-                p->raw_job->calc_checksum = r;
-                p->raw_job->force_memory = !r; /* make sure this is both written to disk if that's
-                                                * requested and into memory, since we need to verify it */
         }
 
         if (size_max != UINT64_MAX)
@@ -889,16 +867,9 @@ int raw_pull_start(
                         return r;
         }
 
-        if (instances != NULL) {
-                FOREACH_ARRAY (instance, instances, n_instances) {
-                        instance->fd = open(instance->path, O_RDONLY|O_NOCTTY|O_CLOEXEC, 0664);
-                        if (instance->fd < 0)
-                                return log_error_errno(errno, "Failed to open instance '%s': %m", instance->path);
-                }
-
-                p->raw_job->instances = instances;
-                p->raw_job->n_instances = n_instances;
-        }
+        r = pull_job_open_instances(p->raw_job, instances, n_instances);
+        if (r < 0)
+                return r;
 
         r = pull_make_verification_jobs(
                         &p->checksum_job,

@@ -73,6 +73,7 @@ int signature_style_from_url(const char *url, SignatureStyle *ret, char **ret_fi
 
 int pull_job_restart_with_sha256sum(PullJob *job, char **ret);
 int pull_job_restart_with_signature(PullJob *job, char **ret);
+int pull_job_open_instances(PullJob *job, PullInstance *instances, size_t n_instances);
 
 bool pull_validate_local(const char *name, ImportFlags flags);
 
