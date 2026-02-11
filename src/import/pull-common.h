@@ -2,6 +2,7 @@
 #pragma once
 
 #include "shared-forward.h"
+#include "sd-event.h"
 #include "import-common.h"
 #include "import-util.h"
 #include <sys/stat.h>
@@ -32,6 +33,7 @@ int pull_make_auxiliary_job(
                 ImportVerify verify,
                 PullJobOpenDisk on_open_disk,
                 PullJobFinished on_finished,
+                sd_event *event,
                 void *userdata);
 int pull_make_verification_jobs(
                 PullJob **ret_checksum_job,
@@ -39,6 +41,7 @@ int pull_make_verification_jobs(
                 ImportVerify verify,
                 const char *url,
                 PullJobFinished on_finished,
+                sd_event *event,
                 void *userdata);
 
 int pull_verify(

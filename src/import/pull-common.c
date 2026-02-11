@@ -174,6 +174,7 @@ int pull_make_auxiliary_job(
                 ImportVerify verify,
                 PullJobOpenDisk on_open_disk,
                 PullJobFinished on_finished,
+                sd_event *event,
                 void *userdata) {
 
         _cleanup_free_ char *last_component = NULL, *ll = NULL, *auxiliary_url = NULL;
@@ -199,7 +200,7 @@ int pull_make_auxiliary_job(
         if (r < 0)
                 return r;
 
-        r = pull_job_new(&job, auxiliary_url, userdata);
+        r = pull_job_new(&job, auxiliary_url, sd_event_ref(event), userdata);
         if (r < 0)
                 return r;
 
@@ -269,6 +270,7 @@ int pull_make_verification_jobs(
                 ImportVerify verify,
                 const char *url,
                 PullJobFinished on_finished,
+                sd_event *event,
                 void *userdata) {
 
         _cleanup_(pull_job_unrefp) PullJob *checksum_job = NULL, *signature_job = NULL;
@@ -319,6 +321,7 @@ int pull_make_verification_jobs(
                                              IMPORT_VERIFY_NO,
                                              pull_job_on_open_disk_checksum,
                                              on_finished,
+                                             sd_event_ref(event),
                                              userdata);
                 if (r < 0)
                         return r;
@@ -348,6 +351,7 @@ int pull_make_verification_jobs(
                                              verify,
                                              pull_job_on_open_disk_signature,
                                              on_finished,
+                                             sd_event_ref(event),
                                              userdata);
                 if (r < 0)
                         return r;

@@ -6,7 +6,7 @@
 typedef struct PullJob PullJob;
 typedef struct PullInstance PullInstance;
 
-typedef int (*PullJobFinished)(PullJob *job);
+typedef void (*PullJobFinished)(PullJob *job);
 typedef int (*PullJobOpenDisk)(PullJob *job);
 typedef void (*PullJobProgress)(PullJob *job);
 
@@ -35,6 +35,9 @@ typedef struct PullJob {
         int error;
 
         char *url;
+
+        sd_varlink *vl;
+        sd_event *event;
 
         void *userdata;
         PullJobFinished on_finished;
@@ -65,12 +68,12 @@ typedef struct PullJob {
         size_t n_instances;
 } PullJob;
 
-int pull_job_new(PullJob **ret, const char *url, void *userdata);
+int pull_job_new(PullJob **ret, const char *url, sd_event *event, void *userdata);
 PullJob* pull_job_unref(PullJob *job);
 
 void pull_job_close_disk_fd(PullJob *j);
 
-int pull_job_finish(PullJob *j, int ret);
+void pull_job_finish(PullJob *j, int ret);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(PullJob*, pull_job_unref);
 

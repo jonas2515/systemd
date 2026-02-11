@@ -34,6 +34,78 @@ static int url_get_protocol(const char *url, const char **protocol) {
         return 0;
 }
 
+static int on_pull_reply(
+                sd_varlink *vl,
+                sd_json_variant *parameters,
+                const char *error_id,
+                sd_varlink_reply_flags_t flags,
+                void *userdata) {
+        PullJob *j = ASSERT_PTR(userdata);
+        int r;
+
+        assert(vl);
+        assert(parameters);
+
+        if (error_id) {
+                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() returned error.");
+
+                goto finish;
+        }
+
+        sd_json_variant *d = sd_json_variant_by_key(parameters, "etagExists");
+        if (!d) {
+                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response is missing 'etagExists' key.");
+                goto finish;
+        }
+
+        if (!sd_json_variant_is_boolean(d)) {
+                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response 'etagExists' field not a boolean");
+                goto finish;
+        }
+
+        j->etag_exists = sd_json_variant_boolean(d);
+
+        d = sd_json_variant_by_key(parameters, "etag");
+        if (d && !sd_json_variant_is_null(d)) {
+                if (!sd_json_variant_is_string(d)) {
+                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                               "PullFile() response 'etag' field not a string");
+                        goto finish;
+                }
+
+                j->etag = strdup(sd_json_variant_string(d));
+                if (!j->etag) {
+                        r = log_oom();
+                        goto finish;
+                }
+        }
+
+        d = sd_json_variant_by_key(parameters, "checksum");
+        if (!d) {
+                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response is missing 'checksum' key.");
+                goto finish;
+        }
+
+        if (!sd_json_variant_is_string(d)) {
+                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PullFile() response 'checksum' field not a string");
+                goto finish;
+        }
+
+        r = sd_json_variant_unhex (d, &j->checksum.iov_base, &j->checksum.iov_len);
+        if (r < 0)
+                goto finish;
+
+        r = 0;
+finish:
+        pull_job_finish(j, r);
+        return r;
+}
+
 int pull_file_job_begin(PullJob *j) {
         int r;
 
@@ -47,25 +119,27 @@ int pull_file_job_begin(PullJob *j) {
         if (r < 0)
                 return log_error_errno(r, "Failed to parse protocol from URL %s: %m", j->url);
 
-        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *pull_link = NULL;
-        r = sd_varlink_connect_address(&pull_link, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        r = sd_varlink_connect_address(&j->vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
         if (r < 0)
                 return log_error_errno(r, "Failed to connect systemd-pull-job-varlink: %m");
 
-        r = sd_varlink_set_allow_fd_passing_output(pull_link, true);
+        r = sd_varlink_set_allow_fd_passing_output(j->vl, true);
         if (r < 0)
                 return log_debug_errno(r, "Failed to enable varlink fd passing for write: %m");
 
+        sd_varlink_attach_event(j->vl, j->event, SD_EVENT_PRIORITY_IDLE);
+        sd_varlink_bind_reply(j->vl, on_pull_reply);
+        sd_varlink_set_userdata(j->vl, j);
 
         j->on_open_disk(j);
 
-        int destination_fd_index = sd_varlink_push_dup_fd(pull_link, j->disk_fd);
+        int destination_fd_index = sd_varlink_push_dup_fd(j->vl, j->disk_fd);
         if (destination_fd_index < 0)
                 return log_error_errno(destination_fd_index, "Failed to push destination fd into varlink socket: %m");
 
         sd_json_variant *instances_array = NULL;
         FOREACH_ARRAY(instance, j->instances, j->n_instances) {
-                int instance_fd_index = sd_varlink_push_fd(pull_link, TAKE_FD(instance->fd));
+                int instance_fd_index = sd_varlink_push_fd(j->vl, TAKE_FD(instance->fd));
                 if (instance_fd_index < 0)
                         return log_error_errno(instance_fd_index, "Failed to push instance fd into varlink socket: %m");
 
@@ -78,13 +152,9 @@ int pull_file_job_begin(PullJob *j) {
                         return r;
         }
 
-        const char *error_id = NULL;
-        sd_json_variant *reply = NULL, *d = NULL;
-        r = varlink_callbo_and_log(
-                pull_link,
+        r = sd_varlink_invokebo(
+                j->vl,
                 "io.systemd.PullJob.PullFile",
-                &reply,
-                &error_id,
                 SD_JSON_BUILD_PAIR_CONDITION(iovec_is_set(&j->expected_checksum), "expectedChecksum", SD_JSON_BUILD_STRING (hexmem(j->expected_checksum.iov_base, j->expected_checksum.iov_len))),
                 SD_JSON_BUILD_PAIR_STRING("source", j->url),
                 SD_JSON_BUILD_PAIR_UNSIGNED("destinationFileDescriptor", destination_fd_index),
@@ -93,44 +163,9 @@ int pull_file_job_begin(PullJob *j) {
                 SD_JSON_BUILD_PAIR_CONDITION(FILE_SIZE_VALID(j->uncompressed_max), "maxSize", SD_JSON_BUILD_UNSIGNED(j->uncompressed_max)),
                 SD_JSON_BUILD_PAIR_CONDITION(j->old_etags != NULL, "oldEtags", SD_JSON_BUILD_STRV(j->old_etags)));
         if (r < 0)
-                return pull_job_finish(j, r);
-
-        d = sd_json_variant_by_key(reply, "etagExists");
-        if (!d)
-                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response is missing 'etagExists' key.");
-
-        if (!sd_json_variant_is_boolean(d))
-                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response 'etagExists' field not a boolean");
-
-        j->etag_exists = sd_json_variant_boolean(d);
-
-        d = sd_json_variant_by_key(reply, "etag");
-        if (d && !sd_json_variant_is_null(d)) {
-                if (!sd_json_variant_is_string(d))
-                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                               "PullFile() response 'etag' field not a string");
-
-                j->etag = strdup(sd_json_variant_string(d));
-                if (!j->etag)
-                        return log_oom();
-        }
-
-        d = sd_json_variant_by_key(reply, "checksum");
-        if (!d)
-                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response is missing 'checksum' key.");
-
-        if (!sd_json_variant_is_string(d))
-                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response 'checksum' field not a string");
-
-        r = sd_json_variant_unhex (d, &j->checksum.iov_base, &j->checksum.iov_len);
-        if (r < 0)
                 return r;
 
-        return pull_job_finish(j, 0);
+        return 0;
 }
 
 void pull_job_close_disk_fd(PullJob *j) {
@@ -154,14 +189,17 @@ PullJob* pull_job_unref(PullJob *j) {
         iovec_done(&j->checksum);
         iovec_done(&j->expected_checksum);
 
+        sd_varlink_unref(j->vl);
+        sd_event_unref(j->event);
+
         return mfree(j);
 }
 
-int pull_job_finish(PullJob *j, int ret) {
+void pull_job_finish(PullJob *j, int ret) {
         assert(j);
 
         if (IN_SET(j->state, PULL_JOB_DONE, PULL_JOB_FAILED))
-                return 0;
+                return;
 
         if (ret == 0) {
                 j->state = PULL_JOB_DONE;
@@ -173,9 +211,7 @@ int pull_job_finish(PullJob *j, int ret) {
         }
 
         if (j->on_finished)
-                return j->on_finished(j);
-        else
-                return 0;
+                j->on_finished(j);
 }
 
 #include "time-util.h"
@@ -183,6 +219,7 @@ int pull_job_finish(PullJob *j, int ret) {
 int pull_job_new(
                 PullJob **ret,
                 const char *url,
+                sd_event *event,
                 void *userdata) {
 
         _cleanup_(pull_job_unrefp) PullJob *j = NULL;
@@ -190,6 +227,7 @@ int pull_job_new(
 
         assert(url);
         assert(ret);
+        assert(event);
 
         u = strdup(url);
         if (!u)
@@ -208,7 +246,8 @@ int pull_job_new(
                 .offset = UINT64_MAX,
                 .sync = true,
                 .instances = NULL,
-                .n_instances = 0
+                .n_instances = 0,
+                .event = sd_event_ref(event),
         };
 
         *ret = TAKE_PTR(j);

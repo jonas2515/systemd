@@ -384,7 +384,7 @@ static bool tar_pull_is_done(TarPull *p) {
         return true;
 }
 
-static int tar_pull_job_on_finished(PullJob *j) {
+static void tar_pull_job_on_finished(PullJob *j) {
         int r;
 
         assert(j);
@@ -414,7 +414,7 @@ static int tar_pull_job_on_finished(PullJob *j) {
          * we already have the etag. */
 
         if (!tar_pull_is_done(p))
-                return 0;
+                return;
 
         if (p->signature_job && p->signature_job->error != 0) {
                 VerificationStyle style;
@@ -561,8 +561,6 @@ finish:
                 p->on_finished(p, r, p->userdata);
         else
                 sd_event_exit(p->event, r);
-
-        return r;
 }
 
 static int tar_pull_job_on_open_disk_tar(PullJob *j) {
@@ -708,7 +706,7 @@ int tar_pull_start(
         p->verify = verify;
 
         /* Set up download job for TAR file */
-        r = pull_job_new(&p->tar_job, url, p);
+        r = pull_job_new(&p->tar_job, url, p->event, p);
         if (r < 0)
                 return r;
 
@@ -737,6 +735,7 @@ int tar_pull_start(
                         verify,
                         url,
                         tar_pull_job_on_finished,
+                        p->event,
                         p);
         if (r < 0)
                 return r;
@@ -751,6 +750,7 @@ int tar_pull_start(
                                 verify,
                                 tar_pull_job_on_open_disk_settings,
                                 tar_pull_job_on_finished,
+                                p->event,
                                 p);
                 if (r < 0)
                         return r;
