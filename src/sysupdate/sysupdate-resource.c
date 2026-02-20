@@ -22,6 +22,7 @@
 #include "gpt.h"
 #include "hexdecoct.h"
 #include "import-util.h"
+#include "memfd-util.h"
 #include "process-util.h"
 #include "sort-util.h"
 #include "stat-util.h"
@@ -272,10 +273,8 @@ static int download_manifest(
                 char **ret_buffer,
                 size_t *ret_size) {
 
-        _cleanup_free_ char *buffer = NULL, *suffixed_url = NULL, *pattern = NULL;
-        _cleanup_fclose_ FILE *manifest = NULL;
-        _cleanup_(unlink_and_freep) char *temp = NULL;
-        const char *vt;
+        _cleanup_free_ char *buffer = NULL, *suffixed_url = NULL;
+        _cleanup_close_ int manifest = -EBADF;
         size_t size = 0;
         pid_t pid;
         int r;
@@ -290,17 +289,10 @@ static int download_manifest(
         if (r < 0)
                 return log_error_errno(r, "Failed to append SHA256SUMS to URL: %m");
 
-        r = var_tmp_dir(&vt);
-        if (r < 0)
-                return log_error_errno(r, "Could not determine temporary directory: %m");
-
-        pattern = path_join(vt, "sysupdate-SHA256SUMS-XXXXXX");
-        if (!pattern)
-                return log_oom();
-
-        r = tempfn_random(pattern, NULL, &temp);
-        if (r < 0)
-                return log_error_errno(r, "Failed to create temporary file path: %m");
+        manifest = memfd_new ("manifest");
+        if (manifest < 0)
+                return log_error_errno(r, "Failed to create memfd for manifest: %m");
+        char *manifest_path = FORMAT_PROC_PID_FD_PATH(0, manifest);
 
         log_info("%s Acquiring manifest file %s%s", glyph(GLYPH_DOWNLOAD),
                  suffixed_url, glyph(GLYPH_ELLIPSIS));
@@ -320,8 +312,9 @@ static int download_manifest(
                         "raw",
                         "--direct",                        /* just download the specified URL, don't download anything else */
                         "--verify", verify_signature ? "signature" : "no", /* verify the manifest file */
+                        "--sync=no", /* syncing fails when writing to the memfd */
                         suffixed_url,
-                        temp,
+                        manifest_path,
                         NULL
                 };
 
@@ -341,7 +334,7 @@ static int download_manifest(
         if (r != 0)
                 return -EPROTO;
 
-        r = read_full_file(temp, &buffer, &size);
+        r = read_full_file(manifest_path, &buffer, &size);
         if (r < 0)
                 return log_error_errno(r, "Failed to read manifest file: %m");
 
