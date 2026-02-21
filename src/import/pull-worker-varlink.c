@@ -121,7 +121,7 @@ int pull_file_job_begin(PullJob *j) {
 
         r = sd_varlink_connect_address(&j->vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
         if (r < 0)
-                return log_error_errno(r, "Failed to connect systemd-pull-job-varlink: %m");
+                return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
 
         r = sd_varlink_set_allow_fd_passing_output(j->vl, true);
         if (r < 0)

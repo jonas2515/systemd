@@ -131,12 +131,8 @@ static int pull_tar(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *ll = NULL, *normalized = NULL;
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
         _cleanup_(tar_pull_unrefp) TarPull *pull = NULL;
-        const char *url, *local;
+        const char *url = argv[1], *local;
         int r;
-
-        url = argv[1];
-        if (!http_url_is_valid(url) && !file_url_is_valid(url))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "URL '%s' is not valid.", url);
 
         if (argc >= 3)
                 local = empty_or_dash_to_null(argv[2]);
@@ -203,12 +199,8 @@ static int pull_raw(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *ll = NULL, *normalized = NULL;
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
         _cleanup_(raw_pull_unrefp) RawPull *pull = NULL;
-        const char *url, *local;
+        const char *url = argv[1], *local;
         int r;
-
-        url = argv[1];
-        if (!http_url_is_valid(url) && !file_url_is_valid(url))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "URL '%s' is not valid.", url);
 
         if (argc >= 3)
                 local = empty_or_dash_to_null(argv[2]);
