@@ -82,6 +82,7 @@ typedef struct PullJob {
 
         bool sync;
         bool force_memory;
+        bool header_only;
 } PullJob;
 
 int pull_job_new(PullJob **ret, const char *url, CurlGlue *glue, void *userdata);
