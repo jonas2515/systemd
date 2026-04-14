@@ -348,12 +348,33 @@ static int download_manifest(
         return 0;
 }
 
+// copied from import/pull-worker-varlink.c
+static int url_get_protocol(const char *url, const char **protocol) {
+        const char *d;
+        size_t length;
+
+        assert(url);
+        assert(protocol);
+
+        /* Find colon separating protocol and hostname */
+        d = strchr(url, ':');
+        if (!d || url == d)
+                return -EINVAL;
+
+        length = d - url;
+
+        *protocol = strndup(url, length);
+        if (!*protocol)
+                return -ENOMEM;
+        return 0;
+}
+
 // mostly copied from pull_file_job_begin from pull-worker-varlink.c
-static int list_instances(const char *url, char **ret_blob, char ***ret_instances) {
+static int list_instances(const char *url, int *ret_blob_fd, char ***ret_instances) {
         int r;
 
         assert(url);
-        assert(ret_blob);
+        assert(ret_blob_fd);
         assert(ret_instances);
 
         const char *protocol;
@@ -366,6 +387,10 @@ static int list_instances(const char *url, char **ret_blob, char ***ret_instance
         if (r < 0)
                 return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
 
+        r = sd_varlink_set_allow_fd_passing_input(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing on varlink: %m");
+
         sd_json_variant *reply = NULL, *d = NULL;
         r = varlink_callbo_and_log(
                 vl,
@@ -375,33 +400,166 @@ static int list_instances(const char *url, char **ret_blob, char ***ret_instance
         if (r < 0)
                 return r;
 
-        d = sd_json_variant_by_key(reply, "blob");
-        if (!d)
+        int n_fds = sd_varlink_get_n_fds(vl);
+        if (n_fds < 1)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response is missing 'blob' key.");
+                                       "ListInstances() response has no blob FD.");
 
-        if (!sd_json_variant_is_string(d))
-                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response 'blob' field not a string");
-
-        *ret_blob = strdup(sd_json_variant_string(d));
-        if (!*ret_blob)
-                return log_oom();
+        *ret_blob_fd = sd_varlink_take_fd(vl, 0);
 
         d = sd_json_variant_by_key(reply, "instances");
         if (!d)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response is missing 'instances' key.");
+                                       "ListInstances() response is missing 'instances' key.");
 
         if (!sd_json_variant_is_array(d))
                 return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response 'instances' field not an array");
+                                       "ListInstances() response 'instances' field not an array");
 
         r = sd_json_variant_strv(d, ret_instances);
         if (r < 0)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                       "PullFile() response 'instances' field not an array");
+                                       "ListInstances() response 'instances' field not an array");
 
+        return 0;
+}
+
+int prepare_update(const char *url, const char *version, int blob_fd, int *ret_prepared_fd) {
+        int r;
+
+        assert(url);
+        assert(version);
+        assert(blob_fd >= 0);
+        assert(ret_prepared_fd);
+
+        const char *protocol;
+        r = url_get_protocol(url, &protocol);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse protocol from URL %s: %m", url);
+
+        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *vl;
+        r = sd_varlink_connect_address(&vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
+
+        r = sd_varlink_set_allow_fd_passing_output(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing output on varlink: %m");
+
+        r = sd_varlink_push_fd(vl, blob_fd);
+        if (r < 0)
+                return log_error_errno(r, "Failed to push blob FD for varlink: %m");
+
+        r = sd_varlink_set_allow_fd_passing_input(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing input on varlink: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *write_target = NULL;
+        r = sd_json_build(&write_target,
+                SD_JSON_BUILD_OBJECT(
+                        SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build write_target: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *existing_images = NULL;
+        r = sd_json_build(&existing_images,
+                SD_JSON_BUILD_ARRAY(
+                        SD_JSON_BUILD_OBJECT(
+                                SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                        )
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build existing_images array: %m");
+
+        sd_json_variant *reply = NULL;
+        r = varlink_callbo_and_log(
+                vl,
+                "io.systemd.Updater.PrepareUpdate",
+                &reply,
+                SD_JSON_BUILD_PAIR_VARIANT("writeTarget", write_target),
+                SD_JSON_BUILD_PAIR_VARIANT("existingImages", existing_images));
+        if (r < 0)
+                return r;
+
+        int n_fds = sd_varlink_get_n_fds(vl);
+        if (n_fds < 1)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PrepareUpdate() response has no prepared FD.");
+
+        *ret_prepared_fd = sd_varlink_take_fd(vl, 0);
+
+        log_debug("PrepareUpdate() call succeeded for version '%s' from '%s', prepared FD=%d.", version, url, *ret_prepared_fd);
+        return 0;
+}
+
+int apply_update(const char *url, const char *version, int prepared_fd) {
+        int r;
+
+        assert(url);
+        assert(version);
+        assert(prepared_fd >= 0);
+
+        const char *protocol;
+        r = url_get_protocol(url, &protocol);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse protocol from URL %s: %m", url);
+
+        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *vl;
+        r = sd_varlink_connect_address(&vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
+
+        r = sd_varlink_set_allow_fd_passing_output(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing output on varlink: %m");
+
+        r = sd_varlink_push_fd(vl, prepared_fd);
+        if (r < 0)
+                return log_error_errno(r, "Failed to push prepared FD for varlink: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *write_target = NULL;
+        r = sd_json_build(&write_target,
+                SD_JSON_BUILD_OBJECT(
+                        SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build write_target: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *existing_images = NULL;
+        r = sd_json_build(&existing_images,
+                SD_JSON_BUILD_ARRAY(
+                        SD_JSON_BUILD_OBJECT(
+                                SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                        )
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build existing_images array: %m");
+
+
+        sd_json_variant *reply = NULL;
+        r = varlink_callbo_and_log(
+                vl,
+                "io.systemd.Updater.Update",
+                &reply,
+                SD_JSON_BUILD_PAIR_VARIANT("writeTarget", write_target),
+                SD_JSON_BUILD_PAIR_VARIANT("existingImages", existing_images));
+        if (r < 0)
+                return r;
+
+        log_debug("Update() call succeeded for version '%s' from '%s'.", version, url);
         return 0;
 }
 
@@ -411,15 +569,14 @@ static int resource_load_from_web(
                 Hashmap **web_cache) {
 
         size_t manifest_size = 0, left = 0;
-        _cleanup_free_ char *buf = NULL;
         const char *manifest, *p;
         size_t line_nr = 1;
         WebCacheItem *ci;
         int r;
 
 
-        _cleanup_free_ char *blob;
-        _cleanup_free_ char **instances;
+        _cleanup_close_ int blob_fd = -EBADF;
+        _cleanup_free_ char **instances = NULL;
 
         assert(rr);
 
@@ -432,11 +589,19 @@ static int resource_load_from_web(
         } else {
                 log_debug("Manifest web cache miss for %s.", rr->path);
 
-                r = list_instances(rr->path, &blob, &instances);
+                r = list_instances(rr->path, &blob_fd, &instances);
                 if (r < 0)
                         return r;
 
-                manifest = buf;
+                if (web_cache && blob_fd >= 0) {
+                        r = web_cache_add_item(web_cache, rr->path, verify, (const char *)(intptr_t) TAKE_FD(blob_fd), 0);
+                        if (r < 0)
+                                log_debug_errno(r, "Failed to add manifest FD '%s' to cache, ignoring: %m", rr->path);
+                        else {
+                                log_debug("Added manifest FD '%s' to cache (fd=%d).", rr->path, blob_fd);
+                                blob_fd = -EBADF;  /* Cache took ownership */
+                        }
+                }
         }
 
         //if (memchr(manifest, 0, manifest_size))

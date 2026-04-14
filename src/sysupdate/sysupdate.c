@@ -9,6 +9,7 @@
 #include "conf-files.h"
 #include "constants.h"
 #include "dissect-image.h"
+#include "fd-util.h"
 #include "format-table.h"
 #include "glyph-util.h"
 #include "hexdecoct.h"
@@ -29,8 +30,10 @@
 #include "string-util.h"
 #include "strv.h"
 #include "sysupdate.h"
+#include "sysupdate-cache.h"
 #include "sysupdate-feature.h"
 #include "sysupdate-instance.h"
+#include "sysupdate-resource.h"
 #include "sysupdate-transfer.h"
 #include "sysupdate-update-set.h"
 #include "sysupdate-util.h"
@@ -930,6 +933,70 @@ static int context_make_offline(Context **ret, const char *node, bool requires_e
         return 0;
 }
 
+static int context_prepare_candidate_update(Context *c) {
+        int r;
+
+        assert(c);
+
+        /* If we have a candidate update selected, prepare it by calling the varlink
+         * PrepareUpdate() method with the cached blob FD. */
+
+        if (!c->candidate) {
+                log_debug("No candidate update found, skipping prepare.");
+                return 0;
+        }
+
+        /* For each instance in the candidate update, retrieve the blob FD from cache
+         * and prepare the update. */
+        FOREACH_ARRAY(inst, c->candidate->instances, c->candidate->n_instances) {
+                Instance *i = *inst;
+                Resource *res;
+                WebCacheItem *ci;
+                _cleanup_close_ int blob_fd = -EBADF;
+                _cleanup_close_ int prepared_fd = -EBADF;
+                _cleanup_free_ char *cache_key = NULL;
+
+                assert(i);
+                res = i->resource;
+                assert(res);
+
+                log_debug("Preparing candidate update version '%s' from resource '%s'.",
+                         c->candidate->version, res->path);
+
+                ci = web_cache_get_item(c->web_cache, res->path, /* verify= */ false);
+                if (!ci || ci->size != 0) {
+                        log_warning("No blob FD found in cache for '%s', skipping prepare.", res->path);
+                        continue;
+                }
+
+                blob_fd = (int)(intptr_t)ci->data;
+                if (blob_fd < 0) {
+                        log_warning("Invalid blob FD in cache for '%s', skipping prepare.", res->path);
+                        continue;
+                }
+
+                r = prepare_update(res->path, c->candidate->version, TAKE_FD(blob_fd), &prepared_fd);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to prepare update for '%s' version '%s', ignoring: %m",
+                                         res->path, c->candidate->version);
+                        continue;
+                }
+
+                r = asprintf(&cache_key, "%s#prepared", res->path);
+                if (r < 0)
+                        return log_oom();
+
+                r = web_cache_add_item(&c->web_cache, cache_key, /* verify= */ false, (const char *)(intptr_t) TAKE_FD(prepared_fd), 0);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to cache prepared FD for '%s', ignoring: %m", res->path);
+                else {
+                        log_debug("Stored prepared FD in cache with key '%s' (fd=%d).", cache_key, prepared_fd);
+                }
+        }
+
+        return 0;
+}
+
 static int context_make_online(Context **ret, const char *node) {
         _cleanup_(context_freep) Context* context = NULL;
         int r;
@@ -950,6 +1017,10 @@ static int context_make_online(Context **ret, const char *node) {
         }
 
         r = context_discover_update_sets(context);
+        if (r < 0)
+                return r;
+
+        r = context_prepare_candidate_update(context);
         if (r < 0)
                 return r;
 
@@ -1084,9 +1155,32 @@ static int context_apply(
                 if (inst->resource == &t->target)
                         continue;
 
-                r = transfer_install_instance(t, inst, arg_root);
+                _cleanup_close_ int prepared_fd = -EBADF;
+                WebCacheItem *ci;
+                _cleanup_free_ char *cache_key = NULL;
+
+                r = asprintf(&cache_key, "%s#prepared", inst->resource->path);
                 if (r < 0)
-                        return r;
+                        return log_oom();
+
+                ci = web_cache_get_item(c->web_cache, cache_key, /* verify= */ false);
+                if (ci && ci->size == 0) {
+                        prepared_fd = (int)(intptr_t)ci->data;
+                        if (prepared_fd >= 0) {
+                                log_debug("Applying update for version '%s' from resource '%s' with prepared FD=%d.",
+                                         us->version, inst->resource->path, prepared_fd);
+
+                                r = apply_update(inst->resource->path, us->version, TAKE_FD(prepared_fd));
+                                if (r < 0) {
+                                        return log_error_errno(r, "Failed to apply update: %m");
+                                }
+
+                                log_debug("Update applied successfully for version '%s'.", us->version);
+
+                        }
+                } else {
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOENT), "No prepared FD found in cache for '%s'.", inst->resource->path);
+                }
         }
 
         log_info("%s Successfully installed update '%s'.", glyph(GLYPH_SPARKLES), us->version);
