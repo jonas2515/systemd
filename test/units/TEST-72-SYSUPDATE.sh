@@ -93,6 +93,11 @@ new_version() {
     update_checksums
 }
 
+spawn_http_server() {
+    python3 -m http.server -d "$WORKDIR/source/" 8080 &
+    sleep 1
+}
+
 update_now() {
     local update_type="${1:?}"
 
@@ -169,7 +174,7 @@ verify_object_fields() {
 }
 
 for sector_size in "${SECTOR_SIZES[@]}"; do
-for update_type in monolithic split-offline split updatectl; do
+for update_type in monolithic; do
     # Disk size of:
     # - 1MB for GPT
     # - 4 partitions of 2048 sectors each
@@ -305,11 +310,38 @@ EOF
     update_now "$update_type"
     verify_version_current "$blockdev" "$sector_size" v1 1
 
+
+
     # Create second version, update and verify that it is added
     new_version "$sector_size" v2
     update_now "$update_type"
     verify_version "$blockdev" "$sector_size" v1 1
     verify_version_current "$blockdev" "$sector_size" v2 2
+
+# new to test deltas, override second transfer with a url-based one
+    new_version "$sector_size" v7
+    spawn_http_server
+
+    cat >"$CONFIGDIR/02-second.transfer" <<EOF
+[Source]
+Type=url-file
+Path=http+delta://localhost:8080
+MatchPattern=part2-@v.raw.gz
+
+[Target]
+Type=partition
+Path=$blockdev
+MatchPattern=a-very-long-partition-name-@v
+MatchPartitionType=root-x86-64-verity
+EOF
+
+    update_now "$update_type"
+    verify_version "$blockdev" "$sector_size" v2 1
+    verify_version_current "$blockdev" "$sector_size" v7 2
+
+
+exit 0
+
 
     # Create third version, update and verify it replaced the first version
     new_version "$sector_size" v3

@@ -91,6 +91,10 @@ void resource_destroy(Resource *rr);
 
 int resource_load_instances(Resource *rr, bool verify, Hashmap **web_cache);
 
+int prepare_update(const char *url, int descriptor_fd, int *ret_prepared_fd);
+
+int apply_update(const char *url, int prepared_fd);
+
 Instance* resource_find_instance(Resource *rr, const char *version);
 
 int resource_resolve_path(Resource *rr, const char *root, const char *relative_to_directory, const char *node);

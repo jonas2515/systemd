@@ -18,13 +18,17 @@
 #include "fdisk-util.h"
 #include "fileio.h"
 #include "find-esp.h"
+#include "fs-util.h"
 #include "glyph-util.h"
 #include "gpt.h"
 #include "hexdecoct.h"
 #include "import-util.h"
 #include "iovec-util.h"
 #include "pidref.h"
+#include "io-util.h"
+#include "memfd-util.h"
 #include "process-util.h"
+#include "sd-varlink.h"
 #include "sort-util.h"
 #include "stat-util.h"
 #include "string-table.h"
@@ -34,8 +38,11 @@
 #include "sysupdate-partition.h"
 #include "sysupdate-pattern.h"
 #include "sysupdate-resource.h"
+#include "sysupdate-util.h"
 #include "time-util.h"
+#include "tmpfile-util.h"
 #include "utf8.h"
+#include "varlink-util.h"
 
 void resource_destroy(Resource *rr) {
         assert(rr);
@@ -48,12 +55,14 @@ void resource_destroy(Resource *rr) {
         free(rr->instances);
 }
 
-static int resource_add_instance(
+static int resource_add_instance_with_fd(
                 Resource *rr,
                 const char *path,
                 const InstanceMetadata *f,
+                int descriptor_fd,
                 Instance **ret) {
 
+        _cleanup_close_ int descriptor_fd_cleaned = descriptor_fd;
         Instance *i;
         int r;
 
@@ -65,7 +74,7 @@ static int resource_add_instance(
         if (!GREEDY_REALLOC(rr->instances, rr->n_instances + 1))
                 return log_oom();
 
-        r = instance_new(rr, path, f, &i);
+        r = instance_new_with_fd(rr, path, f, TAKE_FD(descriptor_fd_cleaned), &i);
         if (r < 0)
                 return r;
 
@@ -75,6 +84,15 @@ static int resource_add_instance(
                 *ret = i;
 
         return 0;
+}
+
+static int resource_add_instance(
+                Resource *rr,
+                const char *path,
+                const InstanceMetadata *f,
+                Instance **ret) {
+
+        return resource_add_instance_with_fd(rr, path, f, -EBADF, ret);
 }
 
 static int resource_load_from_directory_recursive(
@@ -323,8 +341,7 @@ static int download_manifest(
                 size_t *ret_size) {
 
         _cleanup_free_ char *buffer = NULL, *suffixed_url = NULL;
-        _cleanup_close_pair_ int pfd[2] = EBADF_PAIR;
-        _cleanup_fclose_ FILE *manifest = NULL;
+        _cleanup_close_ int manifest = -EBADF;
         size_t size = 0;
         int r;
 
@@ -338,8 +355,10 @@ static int download_manifest(
         if (r < 0)
                 return log_error_errno(r, "Failed to append SHA256SUMS to URL: %m");
 
-        if (pipe2(pfd, O_CLOEXEC) < 0)
-                return log_error_errno(errno, "Failed to allocate pipe: %m");
+        manifest = memfd_new ("manifest");
+        if (manifest < 0)
+                return log_error_errno(r, "Failed to create memfd for manifest: %m");
+        char *manifest_path = FORMAT_PROC_PID_FD_PATH(0, manifest);
 
         log_info("%s Acquiring manifest file %s%s", glyph(GLYPH_DOWNLOAD),
                  suffixed_url, glyph(GLYPH_ELLIPSIS));
@@ -347,7 +366,7 @@ static int download_manifest(
         _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
         r = pidref_safe_fork_full(
                         "(sd-pull)",
-                        (int[]) { -EBADF, pfd[1], STDERR_FILENO },
+                        (int[]) { -EBADF, -EBADF, STDERR_FILENO },
                         NULL, 0,
                         FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_LOG,
                         &pidref);
@@ -361,8 +380,9 @@ static int download_manifest(
                         "raw",
                         "--direct",                        /* just download the specified URL, don't download anything else */
                         "--verify", verify_signature ? "signature" : "no", /* verify the manifest file */
+                        "--sync=no", /* syncing fails when writing to the memfd */
                         suffixed_url,
-                        "-",                               /* write to stdout */
+                        manifest_path,
                         NULL
                 };
 
@@ -371,30 +391,20 @@ static int download_manifest(
                 _exit(EXIT_FAILURE);
         };
 
-        pfd[1] = safe_close(pfd[1]);
-
         /* We'll first load the entire manifest into memory before parsing it. That's because the
          * systemd-pull tool can validate the download only after its completion, but still pass the data to
          * us as it runs. We thus need to check the return value of the process *before* parsing, to be
          * reasonably safe. */
-
-        manifest = fdopen(pfd[0], "r");
-        if (!manifest)
-                return log_error_errno(errno, "Failed to allocate FILE object for manifest file: %m");
-
-        TAKE_FD(pfd[0]);
-
-        r = read_full_stream(manifest, &buffer, &size);
-        if (r < 0)
-                return log_error_errno(r, "Failed to read manifest file from child: %m");
-
-        manifest = safe_fclose(manifest);
 
         r = pidref_wait_for_terminate_and_check("(sd-pull)", &pidref, WAIT_LOG);
         if (r < 0)
                 return r;
         if (r != 0)
                 return -EPROTO;
+
+        r = read_full_file(manifest_path, &buffer, &size);
+        if (r < 0)
+                return log_error_errno(r, "Failed to read manifest file: %m");
 
         *ret_buffer = TAKE_PTR(buffer);
         *ret_size = size;
@@ -464,80 +474,305 @@ static int process_magic_file(
         return 1; /* we processed this line, don't use for pattern matching */
 }
 
+// copied from import/pull-worker-varlink.c
+static int url_get_protocol(const char *url, const char **protocol) {
+        const char *d;
+        size_t length;
+
+        assert(url);
+        assert(protocol);
+
+        /* Find colon separating protocol and hostname */
+        d = strchr(url, ':');
+        if (!d || url == d)
+                return -EINVAL;
+
+        length = d - url;
+
+        *protocol = strndup(url, length);
+        if (!*protocol)
+                return -ENOMEM;
+        return 0;
+}
+
+typedef struct {
+        char *name;
+        int descriptor_fd;
+} ListInstancesItem;
+
+static void list_instances_free(ListInstancesItem *items, size_t n) {
+        if (!items)
+                return;
+        for (size_t i = 0; i < n; i++)
+                free(items[i].name);
+        free(items);
+}
+
+// mostly copied from pull_file_job_begin from pull-worker-varlink.c
+static int list_instances(const char *url, ListInstancesItem **ret_instances, size_t *ret_n_instances) {
+        int r;
+
+        assert(url);
+        assert(ret_instances);
+        assert(ret_n_instances);
+
+        const char *protocol;
+        r = url_get_protocol(url, &protocol);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse protocol from URL %s: %m", url);
+
+        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *vl;
+        r = sd_varlink_connect_address(&vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
+
+        r = sd_varlink_set_allow_fd_passing_input(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing on varlink: %m");
+
+        sd_json_variant *reply = NULL, *d = NULL;
+        r = varlink_callbo_and_log(
+                vl,
+                "io.systemd.Updater.ListInstances",
+                &reply,
+                SD_JSON_BUILD_PAIR_STRING("url", url));
+        if (r < 0)
+                return r;
+
+        d = sd_json_variant_by_key(reply, "instances");
+        if (!d)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "ListInstances() response is missing 'instances' key.");
+
+        if (!sd_json_variant_is_array(d))
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "ListInstances() response 'instances' field not an array");
+
+        size_t n_instances = sd_json_variant_elements(d);
+        ListInstancesItem *items = new(ListInstancesItem, n_instances);
+        if (!items)
+                return log_oom();
+
+        for (size_t i = 0; i < n_instances; i++) {
+                sd_json_variant *elem = sd_json_variant_by_index(d, i);
+                if (!elem || !sd_json_variant_is_object(elem))
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                              "ListInstances() instance at index %zu is not an object", i);
+
+                sd_json_variant *name_var = sd_json_variant_by_key(elem, "name");
+                if (!name_var || !sd_json_variant_is_string(name_var))
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                              "ListInstances() instance at index %zu missing or invalid 'name' field", i);
+
+                sd_json_variant *fd_index_var = sd_json_variant_by_key(elem, "descriptorFdIndex");
+                if (!fd_index_var || !sd_json_variant_is_integer(fd_index_var))
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                              "ListInstances() instance at index %zu missing or invalid 'descriptorFdIndex' field", i);
+
+                const char *name = sd_json_variant_string(name_var);
+                int64_t fd_index = sd_json_variant_integer(fd_index_var);
+
+                if (fd_index < 0 || fd_index >= INT_MAX)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                              "ListInstances() instance at index %zu has invalid fd_index value", i);
+
+                int n_fds_available = sd_varlink_get_n_fds(vl);
+                if (fd_index >= n_fds_available)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                              "ListInstances() FD index %d out of range (%d FDs available)",
+                                              (int)fd_index, n_fds_available);
+
+                _cleanup_close_ int descriptor_fd = sd_varlink_take_fd(vl, (int)fd_index);
+                if (descriptor_fd < 0)
+                        return log_error_errno(descriptor_fd, "Failed to get FD at index %d from varlink: %m", (int)fd_index);
+
+                items[i].name = strdup(name);
+                if (!items[i].name) {
+                        return log_oom();
+                }
+                items[i].descriptor_fd = TAKE_FD(descriptor_fd);
+        }
+
+        *ret_instances = TAKE_PTR(items);
+        *ret_n_instances = n_instances;
+        return 0;
+}
+
+int prepare_update(const char *url, int descriptor_fd, int *ret_prepared_fd) {
+        int r;
+
+        assert(url);
+        assert(descriptor_fd >= 0);
+        assert(ret_prepared_fd);
+
+        const char *protocol;
+        r = url_get_protocol(url, &protocol);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse protocol from URL %s: %m", url);
+
+        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *vl;
+        r = sd_varlink_connect_address(&vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
+
+        r = sd_varlink_set_allow_fd_passing_output(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing output on varlink: %m");
+
+        r = sd_varlink_push_fd(vl, descriptor_fd);
+        if (r < 0)
+                return log_error_errno(r, "Failed to push descriptor FD for varlink: %m");
+
+        r = sd_varlink_set_allow_fd_passing_input(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing input on varlink: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *write_target = NULL;
+        r = sd_json_build(&write_target,
+                SD_JSON_BUILD_OBJECT(
+                        SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build write_target: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *existing_images = NULL;
+        r = sd_json_build(&existing_images,
+                SD_JSON_BUILD_ARRAY(
+                        SD_JSON_BUILD_OBJECT(
+                                SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                        )
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build existing_images array: %m");
+
+        sd_json_variant *reply = NULL;
+        r = varlink_callbo_and_log(
+                vl,
+                "io.systemd.Updater.PrepareUpdate",
+                &reply,
+                SD_JSON_BUILD_PAIR_VARIANT("writeTarget", write_target),
+                SD_JSON_BUILD_PAIR_VARIANT("existingImages", existing_images));
+        if (r < 0)
+                return r;
+
+        int n_fds = sd_varlink_get_n_fds(vl);
+        if (n_fds < 1)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                       "PrepareUpdate() response has no prepared FD.");
+
+        *ret_prepared_fd = sd_varlink_take_fd(vl, 0);
+
+        log_debug("PrepareUpdate() call succeeded");
+        return 0;
+}
+
+int apply_update(const char *url, int prepared_fd) {
+        int r;
+
+        assert(url);
+        assert(prepared_fd >= 0);
+
+        const char *protocol;
+        r = url_get_protocol(url, &protocol);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse protocol from URL %s: %m", url);
+
+        _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *vl;
+        r = sd_varlink_connect_address(&vl, path_join(SYSTEMD_PULL_WORKER_DIRECTORY_PATH, protocol));
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to systemd-pull '%s' backend: %m", protocol);
+
+        r = sd_varlink_set_allow_fd_passing_output(vl, 1);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable FD passing output on varlink: %m");
+
+        r = sd_varlink_push_fd(vl, prepared_fd);
+        if (r < 0)
+                return log_error_errno(r, "Failed to push prepared FD for varlink: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *write_target = NULL;
+        r = sd_json_build(&write_target,
+                SD_JSON_BUILD_OBJECT(
+                        SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                        SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build write_target: %m");
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *existing_images = NULL;
+        r = sd_json_build(&existing_images,
+                SD_JSON_BUILD_ARRAY(
+                        SD_JSON_BUILD_OBJECT(
+                                SD_JSON_BUILD_PAIR_INTEGER("offset", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("maxSize", 0),
+                                SD_JSON_BUILD_PAIR_INTEGER("fdIndex", 0)
+                        )
+                )
+        );
+        if (r < 0)
+                return log_error_errno(r, "Failed to build existing_images array: %m");
+
+
+        sd_json_variant *reply = NULL;
+        r = varlink_callbo_and_log(
+                vl,
+                "io.systemd.Updater.Update",
+                &reply,
+                SD_JSON_BUILD_PAIR_VARIANT("writeTarget", write_target),
+                SD_JSON_BUILD_PAIR_VARIANT("existingImages", existing_images));
+        if (r < 0)
+                return r;
+
+        log_debug("Update() call succeeded for '%s'.", url);
+        return 0;
+}
+
 static int resource_load_from_web(
                 Resource *rr,
                 bool verify,
                 Hashmap **web_cache) {
 
         size_t manifest_size = 0, left = 0;
-        _cleanup_free_ char *buf = NULL;
         const char *manifest, *p;
         size_t line_nr = 1;
         WebCacheItem *ci;
         int r;
 
+        ListInstancesItem *instances = NULL;
+        size_t n_instances = 0;
+
         assert(rr);
         POINTER_MAY_BE_NULL(web_cache);
 
         ci = web_cache ? web_cache_get_item(*web_cache, rr->path, verify) : NULL;
-        if (ci) {
+        if (false && ci) {
                 log_debug("Manifest web cache hit for %s.", rr->path);
 
-                manifest = (char*) ci->data;
-                manifest_size = ci->size;
+                instances = (ListInstancesItem *) ci->data;
+                n_instances = ci->size;
         } else {
                 log_debug("Manifest web cache miss for %s.", rr->path);
 
-                r = download_manifest(rr->path, verify, &buf, &manifest_size);
+                r = list_instances(rr->path, &instances, &n_instances);
                 if (r < 0)
                         return r;
-
-                manifest = buf;
         }
 
-        if (memchr(manifest, 0, manifest_size))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Manifest file has embedded NUL byte, refusing.");
-        if (!utf8_is_valid_n(manifest, manifest_size))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Manifest file is not valid UTF-8, refusing.");
-
-        p = manifest;
-        left = manifest_size;
-
-        while (left > 0) {
+        for (size_t inst_idx = 0; inst_idx < n_instances; inst_idx++) {
                 _cleanup_(instance_metadata_destroy) InstanceMetadata extracted_fields = INSTANCE_METADATA_NULL;
-                _cleanup_(iovec_done) struct iovec h = {};
+                //_cleanup_(iovec_done) struct iovec h = {};
                 _cleanup_free_ char *fn = NULL;
                 Instance *instance;
-                const char *e;
 
-                /* 64 character hash + separator + filename + newline */
-                if (left < 67)
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Corrupt manifest at line %zu, refusing.", line_nr);
-
-                if (p[0] == '\\')
-                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "File names with escapes not supported in manifest at line %zu, refusing.", line_nr);
-
-                r = unhexmem_full(p, 64, /* secure= */ false, &h.iov_base, &h.iov_len);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to parse digest at manifest line %zu, refusing.", line_nr);
-
-                p += 64, left -= 64;
-
-                if (*p != ' ')
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing space separator at manifest line %zu, refusing.", line_nr);
-                p++, left--;
-
-                if (!IN_SET(*p, '*', ' '))
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing binary/text input marker at manifest line %zu, refusing.", line_nr);
-                p++, left--;
-
-                e = memchr(p, '\n', left);
-                if (!e)
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Truncated manifest file at line %zu, refusing.", line_nr);
-                if (e == p)
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Empty filename specified at manifest line %zu, refusing.", line_nr);
-
-                fn = strndup(p, e - p);
+                fn = strdup(instances[inst_idx].name);
                 if (!fn)
                         return log_oom();
 
@@ -546,10 +781,10 @@ static int resource_load_from_web(
                 if (string_has_cc(fn, NULL))
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Filename contains control characters at manifest line %zu, refusing.", line_nr);
 
-                r = process_magic_file(fn, &h);
-                if (r < 0)
-                        return r;
-                if (r == 0) {
+                //r = process_magic_file(fn, &h);
+                //if (r < 0)
+                //        return r;
+                //if (r == 0) {
                         /* If this isn't a magic file, then do the pattern matching */
 
                         r = pattern_match_many(rr->patterns, fn, &extracted_fields);
@@ -562,11 +797,14 @@ static int resource_load_from_web(
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to build instance URL: %m");
 
-                                r = resource_add_instance(rr, path, &extracted_fields, &instance);
+                                // we're giving the descriptor_fd to the instance here, but also to the instances
+                                // on the web cache, ownership is kind of on both, ugh....
+
+                                r = resource_add_instance_with_fd(rr, path, &extracted_fields, instances[inst_idx].descriptor_fd, &instance);
                                 if (r < 0)
                                         return r;
 
-                                assert(h.iov_len == sizeof(instance->metadata.sha256sum));
+                                /*assert(h.iov_len == sizeof(instance->metadata.sha256sum));
 
                                 if (instance->metadata.sha256sum_set) {
                                         if (memcmp(instance->metadata.sha256sum, h.iov_base, h.iov_len) != 0)
@@ -574,27 +812,25 @@ static int resource_load_from_web(
                                 } else {
                                         memcpy(instance->metadata.sha256sum, h.iov_base, h.iov_len);
                                         instance->metadata.sha256sum_set = true;
-                                }
+                                }*/
 
                                 /* Web resources can only be a source, not a target, so
                                  * can never be partial or pending. */
                                 instance->is_partial = false;
                                 instance->is_pending = false;
                         }
-                }
-
-                left -= (e - p) + 1;
-                p = e + 1;
-
-                line_nr++;
+                //}
         }
 
-        if (!ci && web_cache) {
-                r = web_cache_add_item(web_cache, rr->path, verify, manifest, manifest_size);
+        if (web_cache && n_instances >= 0) {
+                r = web_cache_add_item(web_cache, rr->path, verify, instances, n_instances); //FIXME: we're not actually passing the size, this is wrong
                 if (r < 0)
-                        log_debug_errno(r, "Failed to add manifest '%s' to cache, ignoring: %m", rr->path);
+                        log_debug_errno(r, "Failed to add instances '%s' to cache, ignoring: %m", rr->path);
                 else
-                        log_debug("Added manifest '%s' to cache.", rr->path);
+                        log_debug("Added %lu instances '%s' to cache.", n_instances, rr->path);
+        } else {
+                list_instances_free(instances, n_instances);
+
         }
 
         return 0;

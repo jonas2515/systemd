@@ -9,6 +9,7 @@
 #include "conf-files.h"
 #include "constants.h"
 #include "dissect-image.h"
+#include "fd-util.h"
 #include "format-table.h"
 #include "glyph-util.h"
 #include "hexdecoct.h"
@@ -28,8 +29,10 @@
 #include "string-util.h"
 #include "strv.h"
 #include "sysupdate.h"
+#include "sysupdate-cache.h"
 #include "sysupdate-feature.h"
 #include "sysupdate-instance.h"
+#include "sysupdate-resource.h"
 #include "sysupdate-transfer.h"
 #include "sysupdate-update-set.h"
 #include "sysupdate-util.h"
@@ -946,6 +949,71 @@ static int context_make_offline(Context **ret, const char *node, bool requires_e
         return 0;
 }
 
+static int context_prepare_candidate_update(Context *c) {
+        int r;
+
+        assert(c);
+
+        if (!c->candidate) {
+                log_debug("No candidate update found, skipping prepare.");
+                return 0;
+        }
+
+        /* For each instance in the candidate, retrieve the blob FD from cache
+         * and prepare the update. */
+        FOREACH_ARRAY(inst, c->candidate->instances, c->candidate->n_instances) {
+                Instance *i = *inst;
+                Resource *res;
+                WebCacheItem *ci;
+                _cleanup_close_ int blob_fd = -EBADF;
+                _cleanup_close_ int prepared_fd = -EBADF;
+                _cleanup_free_ char *cache_key = NULL;
+
+                assert(i);
+                res = i->resource;
+                assert(res);
+
+                switch (i->resource->type) {
+                        // cool new stuff
+                        case RESOURCE_URL_FILE: {
+
+                                log_debug("Preparing candidate update version '%s' from resource '%s'.",
+                                        c->candidate->version, res->path);
+
+                                if (i->descriptor_fd < 0) {
+                                        return log_error_errno(SYNTHETIC_ERRNO(ENOENT), "Invalid descriptor FD in cache for '%s', giving up.", res->path);
+                                }
+
+                                r = prepare_update(res->path, TAKE_FD(i->descriptor_fd), &prepared_fd);
+                                if (r < 0) {
+                                        return log_error_errno(r, "Failed to prepare update for '%s'  giving up",
+                                                        res->path);
+                                }
+
+                                // we simply replace the descriptor FD with the new opaque FD that we can pass to Update() later
+                                // this is all not great..
+                                i->descriptor_fd = prepared_fd;
+
+                                break;
+                        }
+
+
+                        // lame old stuff :(
+                        case RESOURCE_TAR:
+                        case RESOURCE_REGULAR_FILE:
+                        case RESOURCE_DIRECTORY:
+                        case RESOURCE_SUBVOLUME:
+                        case RESOURCE_PARTITION:
+                        case RESOURCE_URL_TAR: {
+                                break;
+                        }
+                }
+
+        }
+
+        return 0;
+}
+
 static int context_make_online(Context **ret, const char *node) {
         _cleanup_(context_freep) Context* context = NULL;
         int r;
@@ -966,6 +1034,10 @@ static int context_make_online(Context **ret, const char *node) {
         }
 
         r = context_discover_update_sets(context);
+        if (r < 0)
+                return r;
+
+        r = context_prepare_candidate_update(context);
         if (r < 0)
                 return r;
 
@@ -1212,9 +1284,43 @@ static int context_install(
                     !inst->is_pending)
                         continue;
 
-                r = transfer_install_instance(t, inst, arg_root);
-                if (r < 0)
-                        return r;
+                _cleanup_close_ int prepared_fd = -EBADF;
+                WebCacheItem *ci;
+                _cleanup_free_ char *cache_key = NULL;
+
+                switch (inst->resource->type) {
+                        // cool new stuff
+                        case RESOURCE_URL_FILE: {
+
+                                if (inst->descriptor_fd >= 0) {
+                                        log_debug("Applying update for version '%s' from resource '%s'",
+                                                us->version, inst->resource->path);
+
+                                        r = apply_update(inst->resource->path, TAKE_FD(inst->descriptor_fd));
+                                        if (r < 0) {
+                                                return log_error_errno(r, "Failed to apply update: %m");
+                                        }
+
+                                        log_debug("Update applied successfully for version '%s'.", us->version);
+                                }
+                                break;
+                        }
+
+                        // lame old stuff :(
+                        case RESOURCE_TAR:
+                        case RESOURCE_REGULAR_FILE:
+                        case RESOURCE_DIRECTORY:
+                        case RESOURCE_SUBVOLUME:
+                        case RESOURCE_PARTITION:
+                        case RESOURCE_URL_TAR: {
+                                r = transfer_install_instance(t, inst, arg_root);
+                                if (r < 0)
+                                        return r;
+
+                                break;
+
+                        }
+                }
         }
 
         log_info("%s Successfully installed update '%s'.", glyph(GLYPH_SPARKLES), us->version);

@@ -625,14 +625,6 @@ int transfer_read_definition(Transfer *t, const char *path, const char **dirs, H
                         if (!path_is_absolute(t->source.path) || !path_is_normalized(t->source.path))
                                 return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
                                                   "Source path is not a normalized, absolute path: %s", t->source.path);
-
-                /* We unofficially support file:// in addition to http:// and https:// for url
-                 * sources. That's mostly for testing, since it relieves us from having to set up a HTTP
-                 * server, and CURL abstracts this away from us thankfully. */
-                if (RESOURCE_IS_URL(t->source.type))
-                        if (!http_url_is_valid(t->source.path) && !file_url_is_valid(t->source.path))
-                                return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
-                                                  "Source path is not a valid HTTP or HTTPS URL: %s", t->source.path);
         }
 
         if (strv_isempty(t->source.patterns))
@@ -1347,6 +1339,23 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                         return log_oom();
         }
 
+        _cleanup_strv_free_ char **cmd = NULL, **instances_args = NULL;
+        FOREACH_ARRAY(inst, t->target.instances, t->target.n_instances) {
+                if (t->target.type == RESOURCE_PARTITION) {
+                        _cleanup_free_ char *instance_arg;
+                        r = asprintf(&instance_arg, "%s:%" PRIu64 ":%" PRIu64, t->target.path, (*inst)->partition_info.start, (*inst)->partition_info.size);
+                        if (r < 0)
+                                return log_oom();
+                        r = strv_extend_many(&instances_args, "--instance", instance_arg);
+                        if (r < 0)
+                                return log_oom();
+                } else {
+                        r = strv_extend_many(&instances_args, "--instance", (*inst)->path);
+                        if (r < 0)
+                                return log_oom();
+                }
+        }
+
         switch (i->resource->type) { /* Source */
 
         case RESOURCE_REGULAR_FILE:
@@ -1436,25 +1445,26 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                 case RESOURCE_REGULAR_FILE:
 
                         /* url file → regular file */
-
-                        r = run_callout("(sd-pull-raw)",
-                                       STRV_MAKE(
+                        r = strv_extend_many(&cmd,
                                                SYSTEMD_PULL_PATH,
                                                "raw",
                                                "--direct",          /* just download the specified URL, don't download anything else */
                                                "--verify", digest,  /* validate by explicit SHA256 sum */
                                                arg_sync ? "--sync=yes" : "--sync=no",
                                                i->path,
-                                               t->temporary_partial_path),
+                                               t->temporary_partial_path);
+                        if (r < 0)
+                                return log_oom();
+                        strv_extend_strv_concat(&cmd, (const char* const*) instances_args, "");
+
+                        r = run_callout("(sd-pull-raw)", cmd,
                                         t, i, cb, userdata);
                         break;
 
                 case RESOURCE_PARTITION:
 
                         /* url file → partition */
-
-                        r = run_callout("(sd-pull-raw)",
-                                        STRV_MAKE(
+                        cmd = strv_new(
                                                SYSTEMD_PULL_PATH,
                                                "raw",
                                                "--direct",              /* just download the specified URL, don't download anything else */
@@ -1463,7 +1473,10 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                                "--size-max", max_size,
                                                arg_sync ? "--sync=yes" : "--sync=no",
                                                i->path,
-                                               t->target.path),
+                                               t->target.path);
+                        strv_extend_strv_concat(&cmd, (const char* const*) instances_args, "");
+
+                        r = run_callout("(sd-pull-raw)", cmd,
                                         t, i, cb, userdata);
                         break;
 
@@ -1476,8 +1489,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
         case RESOURCE_URL_TAR:
                 assert(IN_SET(t->target.type, RESOURCE_DIRECTORY, RESOURCE_SUBVOLUME));
 
-                r = run_callout("(sd-pull-tar)",
-                                STRV_MAKE(
+                cmd = strv_new(
                                        SYSTEMD_PULL_PATH,
                                        "tar",
                                        "--direct",          /* just download the specified URL, don't download anything else */
@@ -1486,6 +1498,9 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                        arg_sync ? "--sync=yes" : "--sync=no",
                                        i->path,
                                        t->temporary_partial_path),
+                strv_extend_strv_concat(&cmd, (const char* const*) instances_args, "");
+
+                r = run_callout("(sd-pull-tar)", cmd,
                                 t, i, cb, userdata);
                 break;
 

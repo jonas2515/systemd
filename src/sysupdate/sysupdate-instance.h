@@ -48,6 +48,9 @@ struct Instance {
         char *path;  /* includes the `.sysupdate.partial.` (etc.) prefix, if applicable */
         PartitionInfo partition_info;
 
+        /* Opaque file descriptor for this instance (from web resources), or -EBADF if not applicable */
+        int descriptor_fd;
+
         bool is_partial;
         bool is_pending;
 };
@@ -55,6 +58,7 @@ struct Instance {
 void instance_metadata_destroy(InstanceMetadata *m);
 
 int instance_new(Resource *rr, const char *path, const InstanceMetadata *f, Instance **ret);
+int instance_new_with_fd(Resource *rr, const char *path, const InstanceMetadata *f, int descriptor_fd, Instance **ret);
 Instance *instance_free(Instance *i);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Instance*, instance_free);
