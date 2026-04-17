@@ -1,0 +1,23 @@
+#!/bin/bash -e
+
+if [[ ! -d systemd-sysupdate-delta-updater ]]; then
+  git clone https://github.com/jonas2515/systemd-sysupdate-delta-updater
+fi
+
+cd systemd-sysupdate-delta-updater
+
+git checkout to-run-with-systemd
+
+CARGO_HOME=./.cargo cargo build --release
+
+mkdir -p ${DESTDIR}/usr/bin/
+install target/release/systemd-sysupdate-delta-updater ${DESTDIR}/usr/bin/
+
+mkdir -p ${DESTDIR}/run/systemd/io.systemd.PullWorker/
+
+mkdir -p ${DESTDIR}/usr/lib/systemd/system/
+install systemd-unit-files/systemd-pull-backend-https-delta.socket ${DESTDIR}/usr/lib/systemd/system/
+install systemd-unit-files/systemd-pull-backend-https-delta@.service ${DESTDIR}/usr/lib/systemd/system/
+
+mkdir -p ${DESTDIR}/usr/lib/systemd/system/sockets.target.wants/
+ln -s /usr/lib/systemd/system/systemd-pull-backend-https-delta.socket ${DESTDIR}/usr/lib/systemd/system/sockets.target.wants/systemd-pull-backend-https-delta.socket
