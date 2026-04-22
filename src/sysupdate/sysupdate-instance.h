@@ -4,6 +4,7 @@
 #include "sd-id128.h"
 
 #include "sysupdate-forward.h"
+#include "sysupdate-installer-backend.h"
 #include "sysupdate-partition.h"
 
 typedef struct InstanceMetadata {
@@ -47,6 +48,8 @@ struct Instance {
         /* Where we found the instance */
         char *path;  /* includes the `.sysupdate.partial.` (etc.) prefix, if applicable */
         PartitionInfo partition_info;
+
+        SysupdateInstallerBackendAvailableInstance *avail_instance;
 
         bool is_partial;
         bool is_pending;

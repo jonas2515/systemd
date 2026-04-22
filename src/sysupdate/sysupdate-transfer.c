@@ -1259,7 +1259,7 @@ int transfer_compute_temporary_paths(Transfer *t, Instance *i, InstanceMetadata 
         return 0;
 }
 
-int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, TransferProgress cb, void *userdata) {
+int transfer_acquire_instance(Transfer *t, Instance *newest_existing_instance, Instance *i, InstanceMetadata *f, TransferProgress cb, void *userdata) {
         _cleanup_free_ char *digest = NULL;
         char offset[DECIMAL_STR_MAX(uint64_t)+1], max_size[DECIMAL_STR_MAX(uint64_t)+1];
         const char *where = NULL;
@@ -1433,39 +1433,70 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
 
                 switch (t->target.type) {
 
-                case RESOURCE_REGULAR_FILE:
+                case RESOURCE_REGULAR_FILE: {
 
                         /* url file → regular file */
 
-                        r = run_callout("(sd-pull-raw)",
-                                       STRV_MAKE(
-                                               SYSTEMD_PULL_PATH,
-                                               "raw",
-                                               "--direct",          /* just download the specified URL, don't download anything else */
-                                               "--verify", digest,  /* validate by explicit SHA256 sum */
-                                               arg_sync ? "--sync=yes" : "--sync=no",
-                                               i->path,
-                                               t->temporary_partial_path),
-                                        t, i, cb, userdata);
-                        break;
+                        _cleanup_close_ int write_target_fd = -EBADF;
+                        _cleanup_close_ int existing_instance_fd = -EBADF;
 
-                case RESOURCE_PARTITION:
+                        /* Open the target resource for writing */
+                        write_target_fd = open(t->temporary_partial_path, O_WRONLY|O_CLOEXEC|O_NOCTTY);
+                        if (write_target_fd < 0)
+                                return log_error_errno(errno, "Failed to open target resource at '%s' for writing: %m", t->temporary_partial_path);
+
+                        /* Try to open an FD to the existing currently installed instance if it exists */
+                       /* if (t->context) {
+                                Instance *existing = c->newest_installed->instances[i];
+                                if (existing && existing->path) {
+                                        existing_instance_fd = open(existing->path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                                        if (existing_instance_fd < 0)
+                                                log_warning_errno(errno, "Failed to open existing instance at '%s', proceeding without: %m", existing->path);
+                                }
+                        }
+*/
+                        r = installer_backend_call_install_instance(i->path, TAKE_FD(write_target_fd), 0, -1, TAKE_FD(existing_instance_fd), 0, -1, i->avail_instance);
+                        if (r < 0) {
+                                return log_error_errno(r, "Failed to prepare update for '%s', giving up",
+                                                i->path);
+                        }
+
+                        break;
+                }
+
+                case RESOURCE_PARTITION: {
 
                         /* url file → partition */
 
-                        r = run_callout("(sd-pull-raw)",
-                                        STRV_MAKE(
-                                               SYSTEMD_PULL_PATH,
-                                               "raw",
-                                               "--direct",              /* just download the specified URL, don't download anything else */
-                                               "--verify", digest,      /* validate by explicit SHA256 sum */
-                                               "--offset", offset,
-                                               "--size-max", max_size,
-                                               arg_sync ? "--sync=yes" : "--sync=no",
-                                               i->path,
-                                               t->target.path),
-                                        t, i, cb, userdata);
+                        _cleanup_close_ int write_target_fd = -EBADF;
+                        _cleanup_close_ int existing_instance_fd = -EBADF;
+
+                        int write_target_offset = t->partition_info.start;
+                        int write_target_size = t->partition_info.size;
+                        int existing_instance_offset = 0;
+                        int existing_instance_size = 0;
+
+                        write_target_fd = open(t->target.path, O_WRONLY|O_CLOEXEC|O_NOCTTY);
+                        if (write_target_fd < 0)
+                                return log_error_errno(errno, "Failed to open target resource at '%s' for writing: %m", t->target.path);
+
+                        if (newest_existing_instance && newest_existing_instance->resource->path) {
+                                existing_instance_fd = open(newest_existing_instance->resource->path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                                if (existing_instance_fd < 0)
+                                        log_warning_errno(errno, "Failed to open existing instance (version ) at '%s': %m", newest_existing_instance->resource->path);
+
+                                existing_instance_offset = newest_existing_instance->partition_info.start;
+                                existing_instance_size = newest_existing_instance->partition_info.size;
+                        }
+
+                        r = installer_backend_call_install_instance(i->path, TAKE_FD(write_target_fd), write_target_offset, write_target_size, TAKE_FD(existing_instance_fd), existing_instance_offset, existing_instance_size, i->avail_instance);
+                        if (r < 0) {
+                                return log_error_errno(r, "Failed to install update for '%s', giving up",
+                                                i->path);
+                        }
+
                         break;
+                }
 
                 default:
                         assert_not_reached();

@@ -30,6 +30,7 @@
 #include "string-table.h"
 #include "strv.h"
 #include "sysupdate-cache.h"
+#include "sysupdate-installer-backend.h"
 #include "sysupdate-instance.h"
 #include "sysupdate-partition.h"
 #include "sysupdate-pattern.h"
@@ -320,285 +321,59 @@ static int resource_load_from_blockdev(Resource *rr) {
         return 0;
 }
 
-static int download_manifest(
-                const char *url,
-                bool verify_signature,
-                char **ret_buffer,
-                size_t *ret_size) {
-
-        _cleanup_free_ char *buffer = NULL, *suffixed_url = NULL;
-        _cleanup_close_pair_ int pfd[2] = EBADF_PAIR;
-        _cleanup_fclose_ FILE *manifest = NULL;
-        size_t size = 0;
-        int r;
-
-        assert(url);
-        assert(ret_buffer);
-        assert(ret_size);
-
-        /* Download a SHA256SUMS file as manifest */
-
-        r = import_url_append_component(url, "SHA256SUMS", &suffixed_url);
-        if (r < 0)
-                return log_error_errno(r, "Failed to append SHA256SUMS to URL: %m");
-
-        if (pipe2(pfd, O_CLOEXEC) < 0)
-                return log_error_errno(errno, "Failed to allocate pipe: %m");
-
-        log_info("%s Acquiring manifest file %s%s", glyph(GLYPH_DOWNLOAD),
-                 suffixed_url, glyph(GLYPH_ELLIPSIS));
-
-        _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
-        r = pidref_safe_fork_full(
-                        "(sd-pull)",
-                        (int[]) { -EBADF, pfd[1], STDERR_FILENO },
-                        NULL, 0,
-                        FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_LOG,
-                        &pidref);
-        if (r < 0)
-                return r;
-        if (r == 0) {
-                /* Child */
-
-                const char *cmdline[] = {
-                        SYSTEMD_PULL_PATH,
-                        "raw",
-                        "--direct",                        /* just download the specified URL, don't download anything else */
-                        "--verify", verify_signature ? "signature" : "no", /* verify the manifest file */
-                        suffixed_url,
-                        "-",                               /* write to stdout */
-                        NULL
-                };
-
-                r = invoke_callout_binary(SYSTEMD_PULL_PATH, (char *const*) cmdline);
-                log_error_errno(r, "Failed to execute %s tool: %m", SYSTEMD_PULL_PATH);
-                _exit(EXIT_FAILURE);
-        };
-
-        pfd[1] = safe_close(pfd[1]);
-
-        /* We'll first load the entire manifest into memory before parsing it. That's because the
-         * systemd-pull tool can validate the download only after its completion, but still pass the data to
-         * us as it runs. We thus need to check the return value of the process *before* parsing, to be
-         * reasonably safe. */
-
-        manifest = fdopen(pfd[0], "r");
-        if (!manifest)
-                return log_error_errno(errno, "Failed to allocate FILE object for manifest file: %m");
-
-        TAKE_FD(pfd[0]);
-
-        r = read_full_stream(manifest, &buffer, &size);
-        if (r < 0)
-                return log_error_errno(r, "Failed to read manifest file from child: %m");
-
-        manifest = safe_fclose(manifest);
-
-        r = pidref_wait_for_terminate_and_check("(sd-pull)", &pidref, WAIT_LOG);
-        if (r < 0)
-                return r;
-        if (r != 0)
-                return -EPROTO;
-
-        *ret_buffer = TAKE_PTR(buffer);
-        *ret_size = size;
-
-        return 0;
-}
-
-static int process_magic_file(
-                const char *fn,
-                const struct iovec *hash) {
-
-        int r;
-
-        assert(fn);
-        assert(iovec_is_set(hash));
-
-        /* Validates "BEST-BEFORE-*" magic files we find in SHA256SUMS manifests. For now we ignore the
-         * contents of such files (which might change one day), and only look at the file name.
-         *
-         * Note that if multiple BEST-BEFORE-* files exist in the same listing we'll honour them all, and
-         * fail whenever *any* of them indicate a date that's already in the past. */
-
-        const char *e = startswith(fn, "BEST-BEFORE-");
-        if (!e)
-                return 0;
-
-        /* SHA256 hash of an empty file */
-        static const uint8_t expected_hash[] = {
-                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
-                0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
-        };
-
-        /* Even if we ignore if people have non-empty files for this file, let's nonetheless warn about it,
-         * so that people fix it. After all we want to retain liberty to maybe one day place some useful data
-         * inside it */
-        if (!iovec_equal(&IOVEC_MAKE(expected_hash, sizeof(expected_hash)), hash))
-                log_warning("Hash of best before marker file '%s' has unexpected value, proceeding anyway.", fn);
-
-        usec_t best_before;
-        r = parse_calendar_date(e, &best_before);
-        if (r < 0) {
-                log_warning_errno(r, "Found best before marker with an invalid date, ignoring: %s", fn);
-                return 0;
-        }
-
-        usec_t nw = now(CLOCK_REALTIME);
-        if (best_before < nw) {
-                /* We are past the best before date! Yikes! */
-
-                r = secure_getenv_bool("SYSTEMD_SYSUPDATE_VERIFY_FRESHNESS");
-                if (r < 0 && r != -ENXIO)
-                        log_debug_errno(r, "Failed to parse $SYSTEMD_SYSUPDATE_VERIFY_FRESHNESS, ignoring: %m");
-
-                if (r == 0) {
-                        log_warning("Best before marker indicates out-of-date file list, but told to ignore this, hence ignoring (%s < %s).",
-                                    FORMAT_TIMESTAMP(best_before), FORMAT_TIMESTAMP(nw));
-                        return 1; /* we processed this line, don't use for pattern matching */
-                }
-
-                return log_error_errno(
-                                SYNTHETIC_ERRNO(ESTALE),
-                                "Best before marker indicates out-of-date file list, refusing (%s < %s).",
-                                FORMAT_TIMESTAMP(best_before), FORMAT_TIMESTAMP(nw));
-        }
-
-        log_info("Found best before marker, and it checks out, proceeding.");
-        return 1; /* we processed this line, don't use for pattern matching */
-}
-
 static int resource_load_from_web(
                 Resource *rr,
                 bool verify,
                 Hashmap **web_cache) {
 
-        size_t manifest_size = 0, left = 0;
-        _cleanup_free_ char *buf = NULL;
-        const char *manifest, *p;
-        size_t line_nr = 1;
-        WebCacheItem *ci;
         int r;
+        SysupdateInstallerBackendAvailableInstance *instances = NULL;
+        size_t n_instances = 0;
 
         assert(rr);
-        POINTER_MAY_BE_NULL(web_cache);
 
-        ci = web_cache ? web_cache_get_item(*web_cache, rr->path, verify) : NULL;
-        if (ci) {
-                log_debug("Manifest web cache hit for %s.", rr->path);
+        r = installer_backend_call_list_available_instances(rr->path, &instances, &n_instances);
+        if (r < 0)
+                return r;
 
-                manifest = (char*) ci->data;
-                manifest_size = ci->size;
-        } else {
-                log_debug("Manifest web cache miss for %s.", rr->path);
+        CLEANUP_ARRAY(instances, n_instances, sysupdate_installer_backend_available_instances_free);
 
-                r = download_manifest(rr->path, verify, &buf, &manifest_size);
-                if (r < 0)
-                        return r;
-
-                manifest = buf;
-        }
-
-        if (memchr(manifest, 0, manifest_size))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Manifest file has embedded NUL byte, refusing.");
-        if (!utf8_is_valid_n(manifest, manifest_size))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Manifest file is not valid UTF-8, refusing.");
-
-        p = manifest;
-        left = manifest_size;
-
-        while (left > 0) {
+        for (size_t inst_idx = 0; inst_idx < n_instances; inst_idx++) {
+                SysupdateInstallerBackendAvailableInstance *avail_inst = &instances[inst_idx];
                 _cleanup_(instance_metadata_destroy) InstanceMetadata extracted_fields = INSTANCE_METADATA_NULL;
-                _cleanup_(iovec_done) struct iovec h = {};
-                _cleanup_free_ char *fn = NULL;
-                Instance *instance;
-                const char *e;
+                Instance *instance;;
 
-                /* 64 character hash + separator + filename + newline */
-                if (left < 67)
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Corrupt manifest at line %zu, refusing.", line_nr);
+                if (!filename_is_valid(avail_inst->name))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid filename for instance.");
+                if (string_has_cc(avail_inst->name, NULL))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Filename for instance contains control characters, refusing.");
 
-                if (p[0] == '\\')
-                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "File names with escapes not supported in manifest at line %zu, refusing.", line_nr);
-
-                r = unhexmem_full(p, 64, /* secure= */ false, &h.iov_base, &h.iov_len);
+                r = pattern_match_many(rr->patterns, avail_inst->name, &extracted_fields);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to parse digest at manifest line %zu, refusing.", line_nr);
+                        return log_error_errno(r, "Failed to match pattern: %m");
+                if (r == PATTERN_MATCH_YES) {
+                        _cleanup_free_ char *path = NULL;
 
-                p += 64, left -= 64;
-
-                if (*p != ' ')
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing space separator at manifest line %zu, refusing.", line_nr);
-                p++, left--;
-
-                if (!IN_SET(*p, '*', ' '))
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Missing binary/text input marker at manifest line %zu, refusing.", line_nr);
-                p++, left--;
-
-                e = memchr(p, '\n', left);
-                if (!e)
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Truncated manifest file at line %zu, refusing.", line_nr);
-                if (e == p)
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Empty filename specified at manifest line %zu, refusing.", line_nr);
-
-                fn = strndup(p, e - p);
-                if (!fn)
-                        return log_oom();
-
-                if (!filename_is_valid(fn))
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid filename specified at manifest line %zu, refusing.", line_nr);
-                if (string_has_cc(fn, NULL))
-                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Filename contains control characters at manifest line %zu, refusing.", line_nr);
-
-                r = process_magic_file(fn, &h);
-                if (r < 0)
-                        return r;
-                if (r == 0) {
-                        /* If this isn't a magic file, then do the pattern matching */
-
-                        r = pattern_match_many(rr->patterns, fn, &extracted_fields);
+                        r = import_url_append_component(rr->path, avail_inst->name, &path);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to match pattern: %m");
-                        if (r == PATTERN_MATCH_YES) {
-                                _cleanup_free_ char *path = NULL;
+                                return log_error_errno(r, "Failed to build instance URL: %m");
 
-                                r = import_url_append_component(rr->path, fn, &path);
-                                if (r < 0)
-                                        return log_error_errno(r, "Failed to build instance URL: %m");
+                        r = resource_add_instance(rr, path, &extracted_fields, &instance);
+                        if (r < 0)
+                                return r;
 
-                                r = resource_add_instance(rr, path, &extracted_fields, &instance);
-                                if (r < 0)
-                                        return r;
+                        // ugh... no easy way to take ownership of the element so we do it ourselves lol.
+                        // if we had gPtrArray we could steal :(
+                        instance->avail_instance = new(SysupdateInstallerBackendAvailableInstance, 1);
+                        instance->avail_instance->name = TAKE_PTR(avail_inst->name);
+                        instance->avail_instance->available_instance_fd = TAKE_FD(avail_inst->available_instance_fd);
+                        instance->avail_instance->prepared_available_instance_fd = TAKE_FD(avail_inst->prepared_available_instance_fd);
 
-                                assert(h.iov_len == sizeof(instance->metadata.sha256sum));
-
-                                if (instance->metadata.sha256sum_set) {
-                                        if (memcmp(instance->metadata.sha256sum, h.iov_base, h.iov_len) != 0)
-                                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "SHA256 sum parsed from filename and manifest don't match at line %zu, refusing.", line_nr);
-                                } else {
-                                        memcpy(instance->metadata.sha256sum, h.iov_base, h.iov_len);
-                                        instance->metadata.sha256sum_set = true;
-                                }
-
-                                /* Web resources can only be a source, not a target, so
-                                 * can never be partial or pending. */
-                                instance->is_partial = false;
-                                instance->is_pending = false;
-                        }
+                        /* Web resources can only be a source, not a target, so
+                                * can never be partial or pending. */
+                        instance->is_partial = false;
+                        instance->is_pending = false;
                 }
-
-                left -= (e - p) + 1;
-                p = e + 1;
-
-                line_nr++;
-        }
-
-        if (!ci && web_cache) {
-                r = web_cache_add_item(web_cache, rr->path, verify, manifest, manifest_size);
-                if (r < 0)
-                        log_debug_errno(r, "Failed to add manifest '%s' to cache, ignoring: %m", rr->path);
-                else
-                        log_debug("Added manifest '%s' to cache.", rr->path);
         }
 
         return 0;

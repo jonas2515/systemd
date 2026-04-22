@@ -8,6 +8,7 @@
 #include "conf-files.h"
 #include "constants.h"
 #include "dissect-image.h"
+#include "fd-util.h"
 #include "format-table.h"
 #include "glyph-util.h"
 #include "hexdecoct.h"
@@ -29,6 +30,7 @@
 #include "strv.h"
 #include "sysupdate.h"
 #include "sysupdate-feature.h"
+#include "sysupdate-installer-backend.h"
 #include "sysupdate-instance.h"
 #include "sysupdate-transfer.h"
 #include "sysupdate-update-set.h"
@@ -946,6 +948,80 @@ static int context_make_offline(Context **ret, const char *node, bool requires_e
         return 0;
 }
 
+static int context_prepare_candidate_update(Context *c) {
+        int r;
+
+        assert(c);
+
+        if (!c->candidate) {
+                log_debug("No candidate update found, skipping prepare.");
+                return 0;
+        }
+
+        /* For each instance in the candidate, prepare the update with the
+         * installer backend. */
+        for (size_t i = 0; i < c->candidate->n_instances; i++) {
+                Instance *inst = c->candidate->instances[i];
+                Transfer *t = c->transfers[i];
+                Resource *res;
+                _cleanup_close_ int blob_fd = -EBADF;
+                _cleanup_close_ int prepared_fd = -EBADF;
+
+                assert(inst);
+                assert(t);
+
+                res = inst->resource;
+                assert(res);
+
+                if (inst->resource->type == RESOURCE_URL_FILE) {
+                        log_debug("Preparing candidate update version '%s' from resource '%s'.",
+                                c->candidate->version, res->path);
+
+                        _cleanup_close_ int existing_instance_fd = -EBADF;
+                        _cleanup_close_ int write_target_fd = -EBADF;
+                        int existing_instance_offset = 0;
+                        int existing_instance_size = 0;
+
+                        if (!inst->avail_instance) {
+                                return log_error_errno(SYNTHETIC_ERRNO(ENOENT), "No avail instance found on instance for '%s'.", res->path);
+                        }
+
+                        /* Open the write target, but readonly */
+                        printf("path of write target %s\n",t->target.path );
+                        write_target_fd = open(t->target.path, O_WRONLY|O_CLOEXEC|O_NOCTTY);
+                        int write_target_offset = 0;
+                        int write_target_size = 257389257;
+                        if (write_target_fd < 0)
+                                return log_error_errno(errno, "Failed to open target resource at '%s' for writing: %m", t->target.path);
+
+                        /* Try to open an FD to the existing currently installed instance if it exists */
+                        assert(c->newest_installed->n_instances == c->candidate->n_instances);
+                        if (c->newest_installed) {
+                                Instance *existing = c->newest_installed->instances[i];
+                                if (existing && existing->resource->path) {
+                                        existing_instance_fd = open(existing->resource->path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                                        if (existing_instance_fd < 0)
+                                                log_warning_errno(errno, "Failed to open existing instance (version '%s') at '%s': %m", c->newest_installed->version, existing->resource->path);
+
+                                        existing_instance_offset = existing->partition_info.start;
+                                        existing_instance_size = existing->partition_info.size;
+                                }
+                        }
+
+                        r = installer_backend_call_prepare_install_instance(res->path, TAKE_FD(write_target_fd), write_target_offset, write_target_size, existing_instance_fd >= 0 ? TAKE_FD(existing_instance_fd) : -EBADFD, existing_instance_offset, existing_instance_size, inst->avail_instance);
+                        if (r < 0) {
+                                return log_error_errno(r, "Failed to prepare update for '%s', giving up",
+                                                res->path);
+                        }
+
+                        /* We simply replace the descriptor FD with the new opaque FD that we can pass to Update() later */
+                        //inst->descriptor_fd = prepared_fd;
+                }
+        }
+
+        return 0;
+}
+
 static int context_make_online(Context **ret, const char *node) {
         _cleanup_(context_freep) Context* context = NULL;
         int r;
@@ -966,6 +1042,10 @@ static int context_make_online(Context **ret, const char *node) {
         }
 
         r = context_discover_update_sets(context);
+        if (r < 0)
+                return r;
+
+        r = context_prepare_candidate_update(context);
         if (r < 0)
                 return r;
 
@@ -1102,7 +1182,11 @@ static int context_acquire(
                         continue;
                 }
 
-                r = transfer_acquire_instance(t, inst, metadata + i, context_on_acquire_progress, c);
+                Instance *newest_existing = NULL;
+                if (c->newest_installed)
+                        newest_existing = c->newest_installed->instances[i];
+
+                r = transfer_acquire_instance(t, newest_existing, inst, metadata + i, context_on_acquire_progress, c);
                 if (r < 0)
                         return r;
         }
