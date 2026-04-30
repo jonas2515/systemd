@@ -101,7 +101,9 @@ generate_delta_manifests_for_version() {
 }
 
 spawn_http_server() {
-    python3 -m http.server -d "$WORKDIR/source/" 8080 &
+    pushd "$WORKDIR/source/"
+    python3 -m RangeHTTPServer 8080 &
+    popd
     sleep 1
 }
 update_now() {
@@ -497,8 +499,8 @@ EOF
     verify_version_current "$blockdev" "$sector_size" v9 2
     verify_version "$blockdev" "$sector_size" v6 1
 
-    # kill the http server again
-    kill %1
+    # kill the http range server again
+    kill -9 %1
 
     # Cleanup
     [[ -b "$blockdev" ]] && losetup --detach "$blockdev"
