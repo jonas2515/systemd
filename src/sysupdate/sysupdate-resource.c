@@ -293,6 +293,8 @@ static int resource_load_from_blockdev(Resource *rr) {
                 if (IN_SET(r, PATTERN_MATCH_NO, PATTERN_MATCH_RETRY))
                         continue;
 
+                printf("recource adding instance from blockdev, instanfce path %s resource path %s \n", pinfo.device, rr->path);
+                // THIS IS WRONG: pinfo.device is not a valid path, fdisk is lying to use
                 r = resource_add_instance(rr, pinfo.device, &extracted_fields, &instance);
                 if (r < 0)
                         return r;

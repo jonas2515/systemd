@@ -46,6 +46,7 @@ struct Instance {
         InstanceMetadata metadata;
 
         /* Where we found the instance */
+        // FIXME: rename to debug path? or just remove this bullship
         char *path;  /* includes the `.sysupdate.partial.` (etc.) prefix, if applicable */
         PartitionInfo partition_info;
 
