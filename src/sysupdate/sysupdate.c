@@ -948,7 +948,7 @@ static int context_make_offline(Context **ret, const char *node, bool requires_e
         return 0;
 }
 
-static int context_prepare_candidate_update(Context *c) {
+static int context_call_backend_prepare_for_candidates(Context *c) {
         int r;
 
         assert(c);
@@ -958,65 +958,69 @@ static int context_prepare_candidate_update(Context *c) {
                 return 0;
         }
 
-        /* For each instance in the candidate, prepare the update with the
-         * installer backend. */
+        /* We assume the order of instances in c->candidate->instances, c->transfers,
+         * and in c->newest_installed->instances is the same, as that's how we
+         * find the corresponding transfers and already-installed instance for the
+         * current update candidate.
+         * Do a basic sanity-check and at least assert that the arrays are the
+         * same size. */
+        assert(c->candidate->n_instances == c->newest_installed->n_instances);
+        assert(c->candidate->n_instances == c->n_transfers);
+
+        /* For each instance in the candidate, call into the installer backend and
+         * let it prepare the update. */
         for (size_t i = 0; i < c->candidate->n_instances; i++) {
-                Instance *inst = c->candidate->instances[i];
-                Transfer *t = c->transfers[i];
-                Resource *res;
-                _cleanup_close_ int blob_fd = -EBADF;
-                _cleanup_close_ int prepared_fd = -EBADF;
+                Instance *instance = c->candidate->instances[i];
+                Transfer *transfer = c->transfers[i];
+                Instance *existing_instance = c->newest_installed->instances[i];
 
-                assert(inst);
-                assert(t);
+                assert(instance);
+                assert(transfer);
+                assert(existing_instance);
 
-                res = inst->resource;
-                assert(res);
+                if (instance->resource->type != RESOURCE_URL_FILE)
+                        continue;
 
-                if (inst->resource->type == RESOURCE_URL_FILE) {
-                        log_debug("Preparing candidate update version '%s' from resource '%s'.",
-                                c->candidate->version, res->path);
+                log_debug("Preparing candidate update version '%s' at '%s' (newest installed version '%s' at '%s').",
+                          c->candidate->version, instance->resource->path, c->newest_installed->version, existing_instance->resource->path);
 
-                        _cleanup_close_ int existing_instance_fd = -EBADF;
-                        _cleanup_close_ int write_target_fd = -EBADF;
-                        int existing_instance_offset = 0;
-                        int existing_instance_size = 0;
+                if (!instance->backend_avail_instance)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOENT), "Instance at '%s' doesn't have an available instance on an installer backend.", instance->resource->path);
 
-                        if (!inst->avail_instance) {
-                                return log_error_errno(SYNTHETIC_ERRNO(ENOENT), "No avail instance found on instance for '%s'.", res->path);
-                        }
+                /* Open the target resource readonly */
+                _cleanup_close_ int target_fd = open(transfer->target.path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                if (target_fd < 0)
+                        return log_error_errno(errno, "Failed to open target resource at '%s' for reading: %m", transfer->target.path);
 
-                        /* Open the write target, but readonly */
-                        printf("path of write target %s\n",t->target.path );
-                        write_target_fd = open(t->target.path, O_WRONLY|O_CLOEXEC|O_NOCTTY);
-                        int write_target_offset = 0;
-                        int write_target_size = 257389257;
-                        if (write_target_fd < 0)
-                                return log_error_errno(errno, "Failed to open target resource at '%s' for writing: %m", t->target.path);
+                /* Try to open the existing currently installed instance readonly (if it exists) */
+                _cleanup_close_ int existing_instance_fd = -EBADF;
+                int existing_instance_offset = 0;
+                int existing_instance_size = 0;
+                if (existing_instance) {
+                        assert(existing_instance->resource->path);
+                        assert(existing_instance->resource->type == RESOURCE_PARTITION ||
+                               existing_instance->resource->type == RESOURCE_REGULAR_FILE);
 
-                        /* Try to open an FD to the existing currently installed instance if it exists */
-                        assert(c->newest_installed->n_instances == c->candidate->n_instances);
-                        if (c->newest_installed) {
-                                Instance *existing = c->newest_installed->instances[i];
-                                if (existing && existing->resource->path) {
-                                        existing_instance_fd = open(existing->resource->path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
-                                        if (existing_instance_fd < 0)
-                                                log_warning_errno(errno, "Failed to open existing instance (version '%s') at '%s': %m", c->newest_installed->version, existing->resource->path);
+                        existing_instance_fd = open(existing_instance->resource->path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                        if (existing_instance_fd < 0)
+                                log_warning_errno(errno, "Failed to open existing instance (version '%s') at '%s': %m", c->newest_installed->version, existing_instance->resource->path);
 
-                                        existing_instance_offset = existing->partition_info.start;
-                                        existing_instance_size = existing->partition_info.size;
-                                }
-                        }
-
-                        r = installer_backend_call_prepare_install_instance(res->path, TAKE_FD(write_target_fd), write_target_offset, write_target_size, existing_instance_fd >= 0 ? TAKE_FD(existing_instance_fd) : -EBADFD, existing_instance_offset, existing_instance_size, inst->avail_instance);
-                        if (r < 0) {
-                                return log_error_errno(r, "Failed to prepare update for '%s', giving up",
-                                                res->path);
-                        }
-
-                        /* We simply replace the descriptor FD with the new opaque FD that we can pass to Update() later */
-                        //inst->descriptor_fd = prepared_fd;
+                        existing_instance_offset = existing_instance->partition_info.start;
+                        existing_instance_size = existing_instance->partition_info.size;
+                } else {
+                        assert_not_reached();
                 }
+
+                r = installer_backend_call_prepare_install_instance(instance->resource->path,
+                                                                    TAKE_FD(write_target_fd),
+                                                                    write_target_offset,
+                                                                    write_target_size,
+                                                                    TAKE_FD(existing_instance_fd),
+                                                                    existing_instance_offset,
+                                                                    existing_instance_size,
+                                                                    resource->instance->backend_avail_instance);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to prepare update for instance at '%s'", instance->resource->path);
         }
 
         return 0;
@@ -1042,10 +1046,6 @@ static int context_make_online(Context **ret, const char *node) {
         }
 
         r = context_discover_update_sets(context);
-        if (r < 0)
-                return r;
-
-        r = context_prepare_candidate_update(context);
         if (r < 0)
                 return r;
 
@@ -1644,6 +1644,10 @@ static int verb_update_impl(int argc, char **argv, UpdateActionFlags action_flag
                 return r;
 
         r = context_make_online(&context, loop_device ? loop_device->node : NULL);
+        if (r < 0)
+                return r;
+
+        r = context_call_backend_prepare_for_candidates(context);
         if (r < 0)
                 return r;
 

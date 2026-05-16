@@ -63,9 +63,10 @@ static int url_get_protocol(const char *url, const char **protocol) {
 }
 
 int installer_backend_call_list_available_instances(
-                                                const char *url,
-                                                SysupdateInstallerBackendAvailableInstance **ret_instances,
-                                                size_t *ret_n_instances) {
+                const char *url,
+                SysupdateInstallerBackendAvailableInstance **ret_instances,
+                size_t *ret_n_instances) {
+
         int r;
 
         assert(url);
@@ -154,14 +155,16 @@ int installer_backend_call_list_available_instances(
         return 0;
 }
 
-int installer_backend_call_prepare_install_instance(const char *url,
-                                                    int write_target_fd,
-                                                    int write_target_offset,
-                                                    int write_target_max_size,
-                                                    int existing_instance_fd,
-                                                    int existing_instance_offset,
-                                                    int existing_instance_max_size,
-                                                    SysupdateInstallerBackendAvailableInstance *avail_instance) {
+int installer_backend_call_prepare_install_instance(
+                const char *url,
+                int write_target_fd,
+                int write_target_offset,
+                int write_target_max_size,
+                int existing_instance_fd,
+                int existing_instance_offset,
+                int existing_instance_max_size,
+                SysupdateInstallerBackendAvailableInstance *avail_instance) {
+
         int r;
         int prepared_available_instance_fd;
 
@@ -249,14 +252,16 @@ int installer_backend_call_prepare_install_instance(const char *url,
         return 0;
 }
 
-int installer_backend_call_install_instance(const char *url,
-                                            int write_target_fd,
-                                            int write_target_offset,
-                                            int write_target_max_size,
-                                            int existing_instance_fd,
-                                            int existing_instance_offset,
-                                            int existing_instance_max_size,
-                                            SysupdateInstallerBackendAvailableInstance *avail_instance) {
+int installer_backend_call_install_instance(
+                const char *url,
+                int write_target_fd,
+                int write_target_offset,
+                int write_target_max_size,
+                int existing_instance_fd,
+                int existing_instance_offset,
+                int existing_instance_max_size,
+                SysupdateInstallerBackendAvailableInstance *avail_instance) {
+
         int r;
 
         assert(url);
