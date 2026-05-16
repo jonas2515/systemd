@@ -50,7 +50,7 @@ struct Instance {
         char *path;  /* includes the `.sysupdate.partial.` (etc.) prefix, if applicable */
         PartitionInfo partition_info;
 
-        SysupdateInstallerBackendAvailableInstance *backend_avail_instance;
+        SysupdateInstallerBackendAvailableInstance *avail_instance;
 
         bool is_partial;
         bool is_pending;
