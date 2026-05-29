@@ -1634,9 +1634,20 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
                         phase++; /* go to the next phase */
 
         /* Yuck, still some space left? Then make it padding */
-        if (span > 0 && a->after) {
-                assert(a->after->new_padding != UINT64_MAX);
-                a->after->new_padding += span;
+        if (span > 0) {
+                Partition *last_partition = NULL;
+
+                LIST_FOREACH(partitions, p, context->partitions)
+                        if (p->allocated_to_area == a)
+                                last_partition = p;
+
+                if (last_partition) {
+                        assert(last_partition->new_padding != UINT64_MAX);
+                        last_partition->new_padding += span;
+                } else if (a->after) {
+                        assert(a->after->new_padding != UINT64_MAX);
+                        a->after->new_padding += span;
+                }
         }
 
         return 0;
