@@ -1313,7 +1313,7 @@ static uint64_t free_area_current_end(const Context *context, const FreeArea *a)
         assert(a->after->current_size <= UINT64_MAX - a->after->offset);
 
         /* Calculate where the free area ends, based on the offset of the partition preceding it. */
-        return round_up_size(a->after->offset + a->after->current_size, context->grain_size) + free_area_available(a);
+        return a->after->offset + a->after->current_size + free_area_available(a);
 }
 
 static uint64_t free_area_min_end(const Context *context, const FreeArea *a) {
@@ -1327,7 +1327,7 @@ static uint64_t free_area_min_end(const Context *context, const FreeArea *a) {
         assert(a->after->current_size != UINT64_MAX);
 
         /* Calculate where the partition would end when we give it as much as it needs. */
-        return round_up_size(a->after->offset + partition_min_size_with_padding(context, a->after), context->grain_size);
+        return a->after->offset + partition_min_size_with_padding(context, a->after);
 }
 
 static uint64_t free_area_available_for_new_partitions(const Context *context, const FreeArea *a) {
@@ -1349,11 +1349,9 @@ static int free_area_compare(FreeArea *const *a, FreeArea *const*b, Context *con
                    free_area_available_for_new_partitions(context, *b));
 }
 
-static uint64_t charge_size(const Context *context, uint64_t total, uint64_t amount) {
-        assert(context);
-        /* Subtract the specified amount from total, rounding up to multiple of 4K if there's room */
+static uint64_t charge_size(uint64_t total, uint64_t amount) {
         assert(amount <= total);
-        return LESS_BY(total, round_up_size(amount, context->grain_size));
+        return LESS_BY(total, amount);
 }
 
 static uint64_t charge_weight(uint64_t total, uint64_t amount) {
@@ -1613,7 +1611,7 @@ static bool context_grow_partitions_phase(
                         }
 
                         if (charge) {
-                                *span = charge_size(context, *span, p->new_size);
+                                *span = charge_size(*span, p->new_size);
                                 *weight_sum = charge_weight(*weight_sum, weight);
                         }
                 }
@@ -1638,12 +1636,12 @@ static bool context_grow_partitions_phase(
                                 charge = try_again = true;
                         } else if (phase == PHASE_DISTRIBUTE) {
                                 assert(share >= rsz);
-                                p->new_padding = CLAMP(round_down_size(share, context->grain_size), rsz, xsz);
+                                p->new_padding = CLAMP(share, rsz, xsz);
                                 charge = true;
                         }
 
                         if (charge) {
-                                *span = charge_size(context, *span, p->new_padding);
+                                *span = charge_size(*span, p->new_padding);
                                 *weight_sum = charge_weight(*weight_sum, padding_weight);
                         }
                 }
@@ -1669,7 +1667,7 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
                 assert(a->after->offset != UINT64_MAX);
                 assert(a->after->current_size != UINT64_MAX);
 
-                span += round_up_size(a->after->offset + a->after->current_size, context->grain_size) - a->after->offset;
+                span += a->after->current_size;
         }
 
         for (GrowPartitionPhase phase = 0; phase < _GROW_PARTITION_PHASE_MAX;)
@@ -1748,13 +1746,28 @@ static void context_place_partitions(Context *context) {
                         assert(a->after->new_size != UINT64_MAX);
                         assert(a->after->new_padding != UINT64_MAX);
 
-                        start = a->after->offset + a->after->new_size + a->after->new_padding;
-                } else
-                        start = context->start;
+                        start = a->after->offset + a->after->new_size;
+                        log_warning("padd %lu %lu", a->after->new_size, a->after->new_padding);
 
-                start = round_up_size(start, context->grain_size);
+                        assert(a->after->new_padding == 0);
+
+                        // round up to align start of the free area with grain size.
+                        // this is guaranteed to still fit into the pre-calculated size of the
+                        // free area, because we
+                        // wait but how are we guaranteed that the thing still fits into the size
+                        // when we just resized the partition before and calcualated some stupid
+                        // new padding
+                        uint64_t cut_into_padding = round_up_size(start + a->after->new_padding, context->grain_size) - (start + a->after->new_padding);
+                        a->after->new_padding += cut_into_padding;
+
+                        start += a->after->new_padding;
+                        //a->size -= cut_into_padding;
+                } else {
+                        start = round_up_size(context->start, context->grain_size);;
+                }
+
                 left = a->size;
-
+log_warning("stargtin the foreach, size of area=left = %lu", left);
                 LIST_FOREACH(partitions, p, context->partitions) {
                         uint64_t gap;
 
@@ -1768,7 +1781,18 @@ static void context_place_partitions(Context *context) {
                         start += p->new_size;
                         left -= p->new_size;
 
+                        /* new sizes should always be calculated to make sure the end of
+                         * the partition is grain-aligned. */
+                        assert(round_up_size(start, context->grain_size) - start == 0);
+
+                                log_warning("part in foreach, left after new size %lu", left);
+
                         assert(left >= p->new_padding);
+
+                        uint64_t cut_into_padding = (start + p->new_padding) - round_down_size(start + p->new_padding, context->grain_size);
+                        assert(cut_into_padding <= p->new_padding);
+                        p->new_padding -= cut_into_padding;
+
                         start += p->new_padding;
                         left -= p->new_padding;
 
@@ -1778,14 +1802,14 @@ static void context_place_partitions(Context *context) {
                          * --grain-size=) and a small partition like verity-sig (16 KiB) precedes
                          * a larger one: without this, the successor would start at an unaligned
                          * offset. */
-                        gap = round_up_size(start, context->grain_size) - start;
+                        /*gap = round_up_size(start, context->grain_size) - start;
                         if (gap > left) {
                                 log_warning("Not enough space left in free area to re-align partition start to grain size, "
                                             "next partition may start at an unaligned offset.");
                                 gap = 0;
                         }
                         start += gap;
-                        left -= gap;
+                        left -= gap;*/
                 }
         }
 }
