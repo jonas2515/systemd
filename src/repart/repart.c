@@ -1643,10 +1643,10 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
 
                 if (last_partition) {
                         assert(last_partition->new_padding != UINT64_MAX);
-                        last_partition->new_padding += span;
+                        last_partition->new_padding += round_down_size(span, context->grain_size);
                 } else if (a->after) {
                         assert(a->after->new_padding != UINT64_MAX);
-                        a->after->new_padding += span;
+                        a->after->new_padding += round_down_size(span, context->grain_size);
                 }
         }
 
