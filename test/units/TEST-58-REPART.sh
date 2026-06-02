@@ -706,6 +706,127 @@ EOF
     assert_in "$imgs/unaligned3 : start=     3662944, size=    17308536, type=${root_guid}, uuid=${root_uuid}, name=\"root-${architecture}\", attrs=\"GUID:59\"" "$output"
 }
 
+testcase_unaligned2_partition() {
+    local defs imgs output
+
+    defs="$(mktemp --directory "/tmp/test-repart.defs.XXXXXXXXXX")"
+    imgs="$(mktemp --directory "/var/tmp/test-repart.imgs.XXXXXXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$defs' '$imgs'" RETURN
+    chmod 0755 "$defs"
+
+    echo "*** Operate on an image with unaligned partition 2 ***"
+
+    tee "$defs/root.conf" <<EOF
+[Partition]
+Type=root-${architecture}
+EOF
+
+    truncate -s 100MiB "$imgs/unaligned"
+    sfdisk "$imgs/unaligned" <<EOF
+label: gpt
+
+start=2048, size=2049
+EOF
+
+    systemd-repart --offline="$OFFLINE" \
+                   --definitions="$defs" \
+                   --seed="$seed" \
+                   --dry-run=no \
+                   "$imgs/unaligned"
+
+    output=$(sfdisk --dump "$imgs/unaligned")
+
+    assert_in "$imgs/unaligned1 : start=        2048, size=        2049," "$output"
+    assert_in "$imgs/unaligned2 : start=        4104, size=      200656," "$output"
+}
+
+testcase_unaligned3_partition() {
+    local defs imgs output
+
+    defs="$(mktemp --directory "/tmp/test-repart.defs.XXXXXXXXXX")"
+    imgs="$(mktemp --directory "/var/tmp/test-repart.imgs.XXXXXXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$defs' '$imgs'" RETURN
+    chmod 0755 "$defs"
+
+    echo "*** Add an unaligned partition in a gap and increase size of an existing to align with 1 MiB of custom grain ***"
+
+    tee "$defs/root.conf" <<EOF
+[Partition]
+Type=root-${architecture}
+EOF
+
+    tee "$defs/esp.conf" <<EOF
+[Partition]
+Type=esp
+EOF
+
+    truncate -s 10g "$imgs/unaligned"
+    sfdisk "$imgs/unaligned" <<EOF
+label: gpt
+
+start=2048, size=69044, type=${root_guid}
+start=3662944, size=317313
+EOF
+
+    systemd-repart --offline="$OFFLINE" \
+                   --definitions="$defs" \
+                   --seed="$seed" \
+                   --dry-run=no \
+                   --grain-size=1048576 \
+                   "$imgs/unaligned"
+
+    output=$(sfdisk --dump "$imgs/unaligned")
+
+    assert_in "$imgs/unaligned1 : start=        2048, size=     1828864, type=${root_guid}" "$output"
+    assert_in "$imgs/unaligned2 : start=     3662944, size=      317313," "$output"
+    assert_in "$imgs/unaligned3 : start=     1830912, size=     1830912," "$output"
+}
+
+testcase_unaligned4_partition() {
+    local defs imgs output
+
+    defs="$(mktemp --directory "/tmp/test-repart.defs.XXXXXXXXXX")"
+    imgs="$(mktemp --directory "/var/tmp/test-repart.imgs.XXXXXXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$defs' '$imgs'" RETURN
+    chmod 0755 "$defs"
+
+    echo "*** Operate on an image with unaligned partition 4 ***"
+
+    tee "$defs/esp.conf" <<EOF
+[Partition]
+Type=esp
+PaddingMinBytes=8192
+EOF
+
+    tee "$defs/root.conf" <<EOF
+[Partition]
+Type=root-${architecture}
+EOF
+
+    truncate -s 100MiB "$imgs/unaligned"
+    sfdisk "$imgs/unaligned" <<EOF
+label: gpt
+
+start=2048, size=2049, type=${esp_guid}
+EOF
+
+    systemd-repart --offline="$OFFLINE" \
+                   --definitions="$defs" \
+                   --seed="$seed" \
+                   --dry-run=no \
+                   "$imgs/unaligned"
+
+    output=$(sfdisk --dump "$imgs/unaligned")
+
+
+    assert_in "$imgs/unaligned1 : start=        2048, size=      101344, type=${esp_guid}" "$output"
+    assert_in "$imgs/unaligned2 : start=      103408, size=      101352," "$output"
+
+}
+
 testcase_issue_21817() {
     local defs imgs output
 
