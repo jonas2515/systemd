@@ -686,11 +686,59 @@ start=2048, size=69044
 start=71092, size=3591848
 EOF
 
-    systemd-repart --offline="$OFFLINE" \
-                   --definitions="$defs" \
-                   --seed="$seed" \
-                   --dry-run=no \
-                   "$imgs/unaligned"
+    output=$(systemd-repart --offline="$OFFLINE" \
+                            --definitions="$defs" \
+                            --seed="$seed" \
+                            --dry-run=no \
+                            --json=pretty \
+                            "$imgs/unaligned")
+
+    diff -u - <<EOF <(echo "$output")
+[
+	{
+		"type" : "linux-generic",
+		"label" : "linux-generic",
+		"uuid" : "b5ebf61c-def0-4e9c-a795-10666ebc8ce9",
+		"partno" : 0,
+		"file" : null,
+		"node" : "$imgs/unaligned1",
+		"offset" : 1048576,
+		"old_size" : 35350528,
+		"raw_size" : 35350528,
+		"old_padding" : 0,
+		"raw_padding" : 0,
+		"activity" : "unchanged"
+	},
+	{
+		"type" : "linux-generic",
+		"label" : "linux-generic",
+		"uuid" : "45143c67-b13a-435f-8023-ffe1c57c6747",
+		"partno" : 1,
+		"file" : null,
+		"node" : "$imgs/unaligned2",
+		"offset" : 36399104,
+		"old_size" : 1839026176,
+		"raw_size" : 1839026176,
+		"old_padding" : 8861970432,
+		"raw_padding" : 2048,
+		"activity" : "unchanged"
+	},
+	{
+		"type" : "root-$architecture",
+		"label" : "root-$architecture",
+		"uuid" : "87e72e25-f754-4aed-bbff-34225751c22e",
+		"partno" : 2,
+		"file" : "$defs/root.conf",
+		"node" : "$imgs/unaligned3",
+		"offset" : 1875427328,
+		"old_size" : 0,
+		"raw_size" : 8861970432,
+		"old_padding" : 0,
+		"raw_padding" : 0,
+		"activity" : "create"
+	}
+]
+EOF
 
     output=$(sfdisk --dump "$imgs/unaligned")
 
