@@ -1717,10 +1717,15 @@ static void context_place_partitions(Context *context) {
                         assert(a->after->new_padding != UINT64_MAX);
 
                         start = a->after->offset + a->after->new_size + a->after->new_padding;
-                } else
+                        uint64_t gap = round_up_size(start, context->grain_size) - start;
+                        a->after->new_padding += gap;
+                        start += gap;
+                } else {
                         start = context->start;
+                        start = round_up_size(start, context->grain_size);
+                }
 
-                start = round_up_size(start, context->grain_size);
+
                 left = a->size;
 
                 LIST_FOREACH(partitions, p, context->partitions) {
@@ -1737,8 +1742,8 @@ static void context_place_partitions(Context *context) {
                         left -= p->new_size;
 
                         assert(left >= p->new_padding);
-                        start += p->new_padding;
-                        left -= p->new_padding;
+                       // start += p->new_padding;
+                       // left -= p->new_padding;
 
                         /* Re-align start to the grain after each partition, so that the next
                          * partition placed into this free area also starts on a grain boundary.
@@ -1752,8 +1757,13 @@ static void context_place_partitions(Context *context) {
                                             "next partition may start at an unaligned offset.");
                                 gap = 0;
                         }
-                        start += gap;
-                        left -= gap;
+                        p->new_padding += gap;
+                        log_warning("adding gap to padding %lu", p->new_padding);
+                        start += p->new_padding;
+                        left -= p->new_padding;
+
+                        //start += gap;
+                        //left -= gap;
                 }
         }
 }
