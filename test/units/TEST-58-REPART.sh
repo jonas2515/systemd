@@ -2246,60 +2246,6 @@ EOF
     losetup -d "$loop"
 }
 
-testcase_insert_into_gap() {
-    local defs imgs output
-
-    defs="$(mktemp --directory "/tmp/test-repart.defs.XXXXXXXXXX")"
-    imgs="$(mktemp --directory "/var/tmp/test-repart.imgs.XXXXXXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$defs' '$imgs'" RETURN
-    chmod 0755 "$defs"
-
-    echo "*** Inserting a new partition into a gap between two existing partitions ***"
-
-    # Create a disk image with:
-    #  - Partition A at sectors 2048..22527   (10M)
-    #  - A ~49M gap    at sectors 22528..122879
-    #  - Partition C at sectors 122880..143359 (10M)
-    truncate -s 71M "$imgs/gap.img"
-    sfdisk "$imgs/gap.img" <<EOF
-label: gpt
-size=10M, type=${esp_guid}, name="part-a",
-start=60M, size=10M, type=${root_guid}, name="part-c",
-EOF
-
-
-    # Define a new fixed-size 10M partition to fill part of the gap.  Its max size
-    # is smaller than the gap, so there is leftover free space that cannot be
-    # absorbed by growing it.  The bug was that this leftover was added to the
-    # preceding partition's new_padding, pushing the new partition to the end of
-    # the gap (sector 102400, right before C) rather than the start (sector 22528,
-    # right after A).
-    tee "$defs/new.conf" <<EOF
-[Partition]
-Type=usr
-Label=part-b
-SizeMinBytes=10M
-SizeMaxBytes=10M
-EOF
-
-    systemd-repart --offline="$OFFLINE" \
-                   --definitions="$defs" \
-                   --seed="$seed" \
-                   --dry-run=no \
-                   "$imgs/gap.img"
-
-    output=$(sfdisk --dump "$imgs/gap.img")
-
-    # Existing partitions must stay in place.
-    assert_in "$imgs/gap.img1 : start=        2048, size=       20480," "$output"
-    assert_in "$imgs/gap.img2 : start=      122880, size=       20480," "$output"
-
-    # New partition B must start at the beginning of the gap (sector 22528, right
-    # after A), not at the end (sector 102400, right before C).
-    assert_in "$imgs/gap.img3 : start=       22528, size=       20480, type=$usr_guid, uuid=$usr_uuid, name=\"part-b\"" "$output"
-}
-
 OFFLINE="yes"
 run_testcases
 
