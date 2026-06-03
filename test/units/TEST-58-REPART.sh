@@ -510,6 +510,10 @@ EOF
 	}
 ]
 EOF
+
+    output=$(sfdisk --dump "$imgs/zzz")
+
+    assert_in "$imgs/zzz1 : start=        2048, size=       65536," "$output"
 }
 
 testcase_multiple_definitions() {
@@ -583,6 +587,11 @@ EOF
 	}
 ]
 EOF
+
+    output=$(sfdisk --dump "$imgs/zzz")
+
+    assert_in "$imgs/zzz1 : start=        2048, size=       65536," "$output"
+    assert_in "$imgs/zzz2 : start=       67584, size=       65536," "$output"
 }
 
 testcase_copy_blocks() {
