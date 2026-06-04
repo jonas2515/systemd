@@ -1545,16 +1545,8 @@ static bool context_grow_partitions_phase(
                                  * it that, and take this partition out of all calculations and start
                                  * again. */
 
-                                if (p->offset != UINT64_MAX) {
-                                        assert(!PARTITION_IS_FOREIGN(p));
-                                        // we don't control offset, but we do control size, so might as well
-                                        // use the opportunity to align partition end (not size!) by grain
-                                        p->new_size = round_up_size(p->offset + rsz, context->grain_size) - p->offset;
-                                        assert(p->new_size >= rsz);
-                                } else {
-                                        p->new_size = rsz;
-                                        assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
-                                }
+                                p->new_size = rsz;
+                                assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
                                 charge = try_again = true;
 
                         } else if (phase == PHASE_UNDERCHARGE && xsz < share) {
@@ -1562,16 +1554,8 @@ static bool context_grow_partitions_phase(
                                  * share. Let's assign it that, and take this partition out
                                  * of all calculations and start again. */
 
-                                if (p->offset != UINT64_MAX) {
-                                        assert(!PARTITION_IS_FOREIGN(p));
-                                        // we don't control offset, but we do control size, so might as well
-                                        // use the opportunity to align partition end (not size!) by grain
-                                        p->new_size = round_down_size(p->offset + xsz, context->grain_size) - p->offset;
-                                        assert(p->new_size <= xsz);
-                                } else {
-                                        p->new_size = xsz;
-                                        assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
-                                }
+                                p->new_size = xsz;
+                                assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
 
                                 charge = try_again = true;
 
@@ -1582,18 +1566,8 @@ static bool context_grow_partitions_phase(
                                  * partitions. */
 
                                 assert(share >= rsz);
-                                if (p->offset != UINT64_MAX) {
-                                        assert(!PARTITION_IS_FOREIGN(p));
-                                        // we don't control offset, but we do control size, so might as well
-                                        // use the opportunity to align partition end (not size!) by grain
-                                        p->new_size = round_down_size(p->offset + CLAMP(share, rsz, xsz), context->grain_size) - p->offset;
-                                        assert(p->new_size >= rsz);
-                                        assert(p->new_size <= xsz);
-                                } else {
-                                        p->new_size = CLAMP(round_down_size(share, context->grain_size), rsz, xsz);
-                                        assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
-
-                                }
+                                p->new_size = CLAMP(round_down_size(share, context->grain_size), rsz, xsz);
+                                assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
 
                                 charge = true;
                         }
@@ -1717,7 +1691,7 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
 
 
         uint64_t padding_after_after = UINT64_MAX;
-        if (a->after && a->after->offset != UINT64_MAX && PARTITION_IS_FOREIGN (a->after)) {
+        if (a->after && a->after->offset != UINT64_MAX) {
                 // partition before is already placed (and that did not happen by us).
                 // it might not be grain aligned. We might resize it or not, but even
                 // if we resize it, our size will be a multiple of the grain. That means
@@ -1732,7 +1706,6 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
                         // a->after->current_size will be subtracted from span in context_grow_partitions_phase(),
                         // so after that function, span will be a multiple of the grain size (and we assert that)
                 } else {
-                        assert(false);
                         log_warning("not for");
                         // we do control its size -> can assume a size that is a multiple of the grain will be used
                         padding_after_after = round_up_size(a->after->offset, context->grain_size) - a->after->offset;
@@ -1753,7 +1726,7 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
         // assert (for all cases) what we said in the comment right above
         assert(round_up_size(span, context->grain_size) == span);
 
-        if (a->after && a->after->offset != UINT64_MAX && PARTITION_IS_FOREIGN (a->after)) {
+        if (a->after && a->after->offset != UINT64_MAX) {
                 assert(padding_after_after != UINT64_MAX);
                 // we apply the pre-calculated padding now, and on top of the distributed padding that
                 // we decided before
