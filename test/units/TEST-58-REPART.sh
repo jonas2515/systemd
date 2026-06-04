@@ -493,7 +493,7 @@ EOF
 		"raw_size" : 33554432,
 		"size" : "-> 32M",
 		"old_padding" : 0,
-		"raw_padding" : 70234112,
+		"raw_padding" : 70237696,
 		"padding" : "-> 66.9M",
 		"activity" : "create",
 		"drop-in_files" : [
@@ -574,7 +574,7 @@ EOF
 		"raw_size" : 33554432,
 		"size" : "-> 32M",
 		"old_padding" : 0,
-		"raw_padding" : 36679680,
+		"raw_padding" : 36683264,
 		"padding" : "-> 34.9M",
 		"activity" : "create"
 	}
@@ -702,10 +702,13 @@ EOF
                             --json=pretty \
                             "$imgs/unaligned")
 
-    diff -u - <<EOF <(echo "$output" | grep "raw_padding")
+    diff -u - <<EOF <(echo "$output" | grep -P "(old_padding|raw_padding)")
+		"old_padding" : 0,
 		"raw_padding" : 0,
+		"old_padding" : 8861976064,
 		"raw_padding" : 2048,
-		"raw_padding" : 0,
+		"old_padding" : 0,
+		"raw_padding" : 3584,
 EOF
 
     output=$(sfdisk --dump "$imgs/unaligned")
@@ -738,11 +741,19 @@ label: gpt
 start=2048, size=2049
 EOF
 
-    systemd-repart --offline="$OFFLINE" \
-                   --definitions="$defs" \
-                   --seed="$seed" \
-                   --dry-run=no \
-                   "$imgs/unaligned"
+    output=$(systemd-repart --offline="$OFFLINE" \
+                            --definitions="$defs" \
+                            --seed="$seed" \
+                            --dry-run=no \
+                            --json=pretty \
+                            "$imgs/unaligned")
+
+    diff -u - <<EOF <(echo "$output" | grep -P "(old_padding|raw_padding)")
+		"old_padding" : 102743040,
+		"raw_padding" : 3584,
+		"old_padding" : 0,
+		"raw_padding" : 3584,
+EOF
 
     output=$(sfdisk --dump "$imgs/unaligned")
 
@@ -779,12 +790,22 @@ start=2048, size=69044, type=${root_guid}
 start=3662944, size=317313
 EOF
 
-    systemd-repart --offline="$OFFLINE" \
-                   --definitions="$defs" \
-                   --seed="$seed" \
-                   --dry-run=no \
-                   --grain-size=1048576 \
-                   "$imgs/unaligned"
+    output=$(systemd-repart --offline="$OFFLINE" \
+                            --definitions="$defs" \
+                            --seed="$seed" \
+                            --dry-run=no \
+                            --grain-size=1048576 \
+                            --json=pretty \
+                            "$imgs/unaligned")
+
+    diff -u - <<EOF <(echo "$output" | grep -P "(old_padding|raw_padding)")
+		"old_padding" : 1839028224,
+		"raw_padding" : 0,
+		"old_padding" : 0,
+		"raw_padding" : 573440,
+		"old_padding" : 8699509760,
+		"raw_padding" : 8699509760,
+EOF
 
     output=$(sfdisk --dump "$imgs/unaligned")
 
@@ -822,18 +843,115 @@ label: gpt
 start=2048, size=2049, type=${esp_guid}
 EOF
 
-    systemd-repart --offline="$OFFLINE" \
-                   --definitions="$defs" \
-                   --seed="$seed" \
-                   --dry-run=no \
-                   "$imgs/unaligned"
+    output=$(systemd-repart --offline="$OFFLINE" \
+                            --definitions="$defs" \
+                            --seed="$seed" \
+                            --dry-run=no \
+                            --json=pretty \
+                            "$imgs/unaligned")
+
+    diff -u - <<EOF <(echo "$output" | grep -P "(old_padding|raw_padding)")
+		"old_padding" : 102743040,
+		"raw_padding" : 8192,
+		"old_padding" : 0,
+		"raw_padding" : 3584,
+EOF
 
     output=$(sfdisk --dump "$imgs/unaligned")
 
-
     assert_in "$imgs/unaligned1 : start=        2048, size=      101344, type=${esp_guid}" "$output"
     assert_in "$imgs/unaligned2 : start=      103408, size=      101352," "$output"
+}
 
+testcase_unaligned5_partition() {
+    local defs imgs output
+
+    defs="$(mktemp --directory "/tmp/test-repart.defs.XXXXXXXXXX")"
+    imgs="$(mktemp --directory "/var/tmp/test-repart.imgs.XXXXXXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$defs' '$imgs'" RETURN
+    chmod 0755 "$defs"
+
+    echo "*** Operate on an image with unaligned partition 5 ***"
+
+    tee "$defs/esp.conf" <<EOF
+[Partition]
+Type=esp
+PaddingWeight=1000
+EOF
+
+    tee "$defs/root.conf" <<EOF
+[Partition]
+Type=root-${architecture}
+PaddingWeight=0
+EOF
+
+    truncate -s 100MiB "$imgs/unaligned"
+    sfdisk "$imgs/unaligned" <<EOF
+label: gpt
+
+start=2048, size=2049, type=${esp_guid}
+EOF
+
+    output=$(systemd-repart --offline="$OFFLINE" \
+                            --definitions="$defs" \
+                            --seed="$seed" \
+                            --dry-run=no \
+                            --json=pretty \
+                            "$imgs/unaligned")
+
+    diff -u - <<EOF <(echo "$output" | grep -P "(old_padding|raw_padding)")
+		"old_padding" : 102743040,
+		"raw_padding" : 34594816,
+		"old_padding" : 0,
+		"raw_padding" : 3584,
+EOF
+
+    output=$(sfdisk --dump "$imgs/unaligned")
+
+    assert_in "$imgs/unaligned1 : start=        2048, size=       67568, type=${esp_guid}" "$output"
+    assert_in "$imgs/unaligned2 : start=      137184, size=       67576," "$output"
+}
+
+testcase_zero_padding() {
+    local defs imgs output
+
+    defs="$(mktemp --directory "/tmp/test-repart.defs.XXXXXXXXXX")"
+    imgs="$(mktemp --directory "/var/tmp/test-repart.imgs.XXXXXXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$defs' '$imgs'" RETURN
+    chmod 0755 "$defs"
+
+    echo "*** Add an unaligned partition in a gap and increase size of an existing to align with 1 MiB of custom grain ***"
+
+    tee "$defs/root.conf" <<EOF
+[Partition]
+Type=root-${architecture}
+EOF
+
+    # this size should allow for having zero padding a 4096 (the default) grain size
+    truncate -s 104858112 "$imgs/unaligned"
+    sfdisk "$imgs/unaligned" <<EOF
+label: gpt
+first-lba: 34
+
+EOF
+
+    output=$(systemd-repart --offline="$OFFLINE" \
+                            --definitions="$defs" \
+                            --seed="$seed" \
+                            --dry-run=no \
+                            --json=pretty \
+                            "$imgs/unaligned")
+
+    diff -u - <<EOF <(echo "$output" | grep -P "(old_padding|raw_padding)")
+		"old_padding" : 0,
+		"raw_padding" : 0,
+EOF
+
+    output=$(sfdisk --dump "$imgs/unaligned")
+
+    assert_in "$imgs/unaligned1 : start=          40, size=      204728, type=${root_guid}" "$output"
 }
 
 testcase_issue_21817() {
