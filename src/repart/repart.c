@@ -1056,7 +1056,7 @@ static int context_add_free_area(
                 Partition *after) {
 
         FreeArea *a;
-
+log_warning("adding free area");
         assert(context);
         assert(!after || !after->padding_area);
 
@@ -1589,6 +1589,7 @@ static bool context_grow_partitions_phase(
                                  * again. */
 
                                 p->new_size = rsz;
+                                assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
                                 charge = try_again = true;
 
                         } else if (phase == PHASE_UNDERCHARGE && xsz < share) {
@@ -1597,6 +1598,8 @@ static bool context_grow_partitions_phase(
                                  * of all calculations and start again. */
 
                                 p->new_size = xsz;
+                                assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
+
                                 charge = try_again = true;
 
                         } else if (phase == PHASE_DISTRIBUTE) {
@@ -1607,10 +1610,19 @@ static bool context_grow_partitions_phase(
 
                                 assert(share >= rsz);
                                 p->new_size = CLAMP(round_down_size(share, context->grain_size), rsz, xsz);
+                                assert(round_up_size(p->new_size, context->grain_size) == p->new_size);
+
                                 charge = true;
                         }
 
                         if (charge) {
+                                // conscious decision to subtract the rounded "p->new_size" here rather
+                                // than subtracting the unrounded "share". The latter would ensure partitions
+                                // with the same weight would receive exactly the same size, while
+                                // the former will assign any newly left over space from rounding down
+                                // of the preceding partition to the following partition. That means the latter
+                                // favours assigning all the space to partitions over being 100% correct
+                                // when it comes to applying weights.
                                 *span = charge_size(*span, p->new_size);
                                 *weight_sum = charge_weight(*weight_sum, weight);
                         }
@@ -1624,23 +1636,44 @@ static bool context_grow_partitions_phase(
                         padding_weight = partition_padding_weight(p);
 
                         share = scale_by_weight(*span, padding_weight, *weight_sum);
-
+                        log_warning("scaling padding by span %lu weight %lu phase %u", *span, share, phase);
                         rsz = partition_min_padding(p);
                         xsz = partition_max_padding(p);
 
                         if (phase == PHASE_OVERCHARGE && rsz > share) {
                                 p->new_padding = rsz;
+                                assert(round_up_size(p->new_padding, context->grain_size) == p->new_padding);
+
                                 charge = try_again = true;
                         } else if (phase == PHASE_UNDERCHARGE && xsz < share) {
                                 p->new_padding = xsz;
+                                assert(round_up_size(p->new_padding, context->grain_size) == p->new_padding);
+
                                 charge = try_again = true;
                         } else if (phase == PHASE_DISTRIBUTE) {
                                 assert(share >= rsz);
-                                p->new_padding = CLAMP(share, rsz, xsz);
+                                if (p->offset == UINT64_MAX) {
+                                        // we are the ones placing the partition, ie.
+                                        // we will ensure offset and size of partition are grain aligned. Therefore the
+                                        // end of the partition will be grain aligned, therefore we will
+                                        // grain-align the padding, ensuring the partition after can be grain-aligned
+                                        // as well.
+                                        assert(!PARTITION_IS_FOREIGN(p));
+                                        log_warning("we place part, existing padding share %lu", share);
+                                        p->new_padding = CLAMP(round_down_size(share, context->grain_size), rsz, xsz);
+                                } else {
+                                        // we are not placing this partion (we might be setting its size though).
+                                        // We're ensuring that the end will be grain aligned in the calling function
+                                        p->new_padding = CLAMP(round_down_size(share, context->grain_size), rsz, xsz);
+                                }
+                                assert(round_up_size(p->new_padding, context->grain_size) == p->new_padding);
+
                                 charge = true;
                         }
 
                         if (charge) {
+                                // see the comment in the other if(charge) block above on why we subtract
+                                // the rounded "p->new_padding" rather than the unrounded "share"
                                 *span = charge_size(*span, p->new_padding);
                                 *weight_sum = charge_weight(*weight_sum, padding_weight);
                         }
@@ -1651,7 +1684,7 @@ static bool context_grow_partitions_phase(
 }
 
 static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
-        uint64_t weight_sum = 0, span;
+        uint64_t weight_sum = 0, span, full_size;
         int r;
 
         assert(context);
@@ -1662,23 +1695,111 @@ static int context_grow_partitions_on_free_area(Context *context, FreeArea *a) {
                 return r;
 
         /* Let's calculate the total area covered by this free area and the partition before it */
-        span = a->size;
+       // span = a->size;
         if (a->after) {
                 assert(a->after->offset != UINT64_MAX);
                 assert(a->after->current_size != UINT64_MAX);
+                assert(a->after->current_padding == a->size);
+                assert(a->after->new_padding == UINT64_MAX);
+                assert(a->after->new_size == UINT64_MAX);
 
-                span += a->after->current_size;
+                // start of *not the area*, but the partition before the area,
+                // it might not be grain aligned, but we deal with that below
+                uint64_t start = a->after->offset;
+                log_warning("context start: start=%lu", start);
+
+                // this is the physical, *actual* end of the free area, rounded down to the
+                // nearest grain-aligned point
+                uint64_t end = round_down_size(a->after->offset + a->after->current_size + a->size, context->grain_size);
+                log_warning("context end: size=%lu end=%lu, rounded=%lu, span=%lu", a->size, a->after->offset + a->after->current_size + a->size, end, end - start);
+
+                span = end - start;
+                full_size =  a->after->current_size + a->size;
+        } else {
+                // there's  no partition before the area, so use start of the context.
+                // might not be grain aligned, so round up
+                uint64_t start = round_up_size(context->start, context->grain_size);
+                log_warning("context start: start=%lu, rounded=%lu", context->start, start);
+
+                // this is the physical, *actual* end of the free area, rounded down to the
+                // nearest grain-aligned point
+                uint64_t end = round_down_size(context->start + a->size, context->grain_size);
+                log_warning("context end: size=%lu end=%lu, rounded=%lu, span=%lu", a->size, context->start + a->size, end, end - start);
+
+                span = end - start;
+                full_size = a->size;
         }
+
+        uint64_t span_begin = span;
+
+
+        uint64_t padding_after_after = UINT64_MAX;
+        if (a->after && a->after->offset != UINT64_MAX) {
+                // partition before is already placed (and that did not happen by us).
+                // it might not be grain aligned. We might resize it or not, but even
+                // if we resize it, our size will be a multiple of the grain. That means
+                // its end will not be grain aligned if the start is not. Since we want
+                // place partitions after that one, we first calculate how much padding
+                // will  be needed to align the end with the grain.
+                if (PARTITION_IS_FOREIGN (a->after)) {
+                        log_warning("for");
+                        // we don't control its size -> need to live with the existing end-point
+                        padding_after_after = round_up_size(a->after->offset + a->after->current_size, context->grain_size) - (a->after->offset + a->after->current_size);
+
+                        // a->after->current_size will be subtracted from span in context_grow_partitions_phase(),
+                        // so after that function, span will be a multiple of the grain size (and we assert that)
+                } else {
+                        log_warning("not for");
+                        // we do control its size -> can assume a size that is a multiple of the grain will be used
+                        padding_after_after = round_up_size(a->after->offset, context->grain_size) - a->after->offset;
+                }
+                log_warning("padding after %lu", padding_after_after);
+
+                // reserve the padding that is needed to align the end of the
+                // pre-placed partition by grain, so that we don't end up spending that
+                // on some other partition
+                span -= padding_after_after;
+        }
+
 
         for (GrowPartitionPhase phase = 0; phase < _GROW_PARTITION_PHASE_MAX;)
                 if (context_grow_partitions_phase(context, a, phase, &span, &weight_sum))
                         phase++; /* go to the next phase */
 
+        // assert (for all cases) what we said in the comment right above
+        assert(round_up_size(span, context->grain_size) == span);
+
+        if (a->after && a->after->offset != UINT64_MAX) {
+                assert(padding_after_after != UINT64_MAX);
+                // we apply the pre-calculated padding now, and on top of the distributed padding that
+                // we decided before
+                a->after->new_padding += padding_after_after;
+        }
+
+        log_warning("grew partitions as usual, span now %lu", span);
+
+        // should still be the case (as above)
+        assert(round_up_size(span, context->grain_size) == span);
+
         /* Yuck, still some space left? Then make it padding */
         if (span > 0 && a->after) {
                 assert(a->after->new_padding != UINT64_MAX);
+                log_warning("space left, added padding to after");
+
+                // endOffset + padding is already ensured to be grain aligned by now,
+                // so can just round the span that we're adding
+                //a->after->new_padding += round_down_size(span, context->grain_size);
+
+                // span must be grain aligned (we assert above), so no need to round it
                 a->after->new_padding += span;
         }
+
+        // update the area size again now that we possibly resized the partition before and
+        // updated its padding. Note that this again is the full physical size of the area,
+        // so likely not grain-aligned.
+        if (a->after)
+                a->size = full_size - (a->after->new_size + a->after->new_padding);
+
 
         return 0;
 }
@@ -1698,10 +1819,13 @@ static int context_grow_partitions(Context *context) {
         LIST_FOREACH(partitions, p, context->partitions) {
                 if (p->dropped)
                         continue;
+                        log_warning("looping through part: new_size=%lu new_padding=%lu, current_size=%lu, current_padding=%lu", p->new_size, p->new_padding, p->current_size, p->current_padding);
 
                 if (!PARTITION_EXISTS(p) || p->padding_area) {
                         /* The algorithm above must have initialized this already */
                         assert(p->new_size != UINT64_MAX);
+                        log_warning("looping has are");
+
                         continue;
                 }
 
@@ -1738,41 +1862,54 @@ static void context_place_partitions(Context *context) {
 
         for (size_t i = 0; i < context->n_free_areas; i++) {
                 FreeArea *a = context->free_areas[i];
-                uint64_t left;
+
                 uint64_t start;
+                uint64_t left, real_left;
+
+                Partition *last = NULL;
 
                 if (a->after) {
                         assert(a->after->offset != UINT64_MAX);
                         assert(a->after->new_size != UINT64_MAX);
                         assert(a->after->new_padding != UINT64_MAX);
 
-                        start = a->after->offset + a->after->new_size;
-                        log_warning("padd %lu %lu", a->after->new_size, a->after->new_padding);
+                        // no longer true now that we change area size
+                       // assert(a->after->current_padding == a->size);
 
-                        assert(a->after->new_padding == 0);
+                        // beginning of the area must now be aligned with the grain grid
+                        // because we either resized the partition before so that its
+                        // end is aligned, or we added padding so that the end of that
+                        // is aligned
+                        assert(round_down_size(a->after->offset + a->after->new_size + a->after->new_padding, context->grain_size) - (a->after->offset + a->after->new_size + a->after->new_padding) == 0);
+                        start = a->after->offset + a->after->new_size + a->after->new_padding;
 
-                        // round up to align start of the free area with grain size.
-                        // this is guaranteed to still fit into the pre-calculated size of the
-                        // free area, because we
-                        // wait but how are we guaranteed that the thing still fits into the size
-                        // when we just resized the partition before and calcualated some stupid
-                        // new padding
-                        uint64_t cut_into_padding = round_up_size(start + a->after->new_padding, context->grain_size) - (start + a->after->new_padding);
-                        a->after->new_padding += cut_into_padding;
+                        // size of area is not grain aligned, so still need to round down its end
+                        uint64_t end = round_down_size(start + a->size, context->grain_size);
 
-                        start += a->after->new_padding;
-                        //a->size -= cut_into_padding;
+                        left = end - start;
+                        real_left = a->size;
                 } else {
-                        start = round_up_size(context->start, context->grain_size);;
+                        // if there's no partition before, we might (FIXME: is this true?) start
+                        // at a non-aligned position, so need to round up here
+                        // round up here the same way we round up in context_grow_partitions_on_free_area()
+                        start = round_up_size(context->start, context->grain_size);
+                        log_warning("context start: %lu, rounded=%lu", context->start, start);
+
+                        // round down here the same way we round down in context_grow_partitions_on_free_area()
+                        uint64_t end = round_down_size(context->start + a->size, context->grain_size);
+                        log_warning("context end: size %lu end=%lu, rounded=%lu", a->size, start + a->size, end);
+
+                        left = end - start;
+                        real_left = a->size - (start - context->start);
                 }
 
-                left = a->size;
-log_warning("stargtin the foreach, size of area=left = %lu", left);
                 LIST_FOREACH(partitions, p, context->partitions) {
                         uint64_t gap;
 
                         if (p->allocated_to_area != a)
                                 continue;
+
+                        assert(round_up_size(start, context->grain_size) == start);
 
                         p->offset = start;
                         p->partno = find_first_unused_partno(context);
@@ -1780,21 +1917,20 @@ log_warning("stargtin the foreach, size of area=left = %lu", left);
                         assert(left >= p->new_size);
                         start += p->new_size;
                         left -= p->new_size;
+                        real_left -= p->new_size;
+
 
                         /* new sizes should always be calculated to make sure the end of
                          * the partition is grain-aligned. */
-                        assert(round_up_size(start, context->grain_size) - start == 0);
+                        assert(round_up_size(start, context->grain_size) == start);
 
-                                log_warning("part in foreach, left after new size %lu", left);
 
                         assert(left >= p->new_padding);
-
-                        uint64_t cut_into_padding = (start + p->new_padding) - round_down_size(start + p->new_padding, context->grain_size);
-                        assert(cut_into_padding <= p->new_padding);
-                        p->new_padding -= cut_into_padding;
-
                         start += p->new_padding;
                         left -= p->new_padding;
+                        real_left -= p->new_padding;
+
+                        log_warning("placed part now! start now=%lu , real left now=%lu", start, real_left);
 
                         /* Re-align start to the grain after each partition, so that the next
                          * partition placed into this free area also starts on a grain boundary.
@@ -1810,7 +1946,26 @@ log_warning("stargtin the foreach, size of area=left = %lu", left);
                         }
                         start += gap;
                         left -= gap;*/
+
+                        last = p;
                 }
+
+                // our size + padding calculations beforehand should have been *on point*
+                // if there are no partitions and we simply create the partition table (!context->partitions),
+                // or if the free area simply is at the start of the partition table (!last && !a->after),
+                // this would fail
+                if (last || a->after)
+                        assert(left == 0);
+
+                // add any bytes that are left as padding to the last partition.
+                // This is not really necessary at this point anymore, but we want
+                // to show the correct padding in our table.
+                log_warning("there's some extra pad new %lu ", real_left);
+                if (last)
+                        last->new_padding += real_left;
+                else if (a->after)
+                        a->after->new_padding += real_left;
+
         }
 }
 
@@ -3303,8 +3458,8 @@ static int determine_current_padding(
         }
 
         assert(next >= offset);
-        offset = round_up_size(offset, grainsz);
-        next = round_down_size(next, grainsz);
+     //   offset = round_up_size(offset, grainsz);
+     //   next = round_down_size(next, grainsz);
 
         *ret = LESS_BY(next, offset); /* Saturated subtraction, rounding might have fucked things up */
         return 0;
@@ -3419,7 +3574,11 @@ static int context_copy_from_one(Context *context, const char *src) {
                 if (r < 0)
                         return r;
 
-                np->padding_min = np->padding_max = padding;
+                // this might not be grain aligned, so we align it by grain..
+                // slightly different from what determine_current_padding() used to do
+                // but doing rounding here seems a little stupid anyway.. we have to do
+                // it because of the copy_from test, which fails otherwise
+                np->padding_min = np->padding_max = round_down_size(padding, grainsz);
 
                 np->copy_blocks_path = strdup(src);
                 if (!np->copy_blocks_path)
@@ -4086,8 +4245,8 @@ add_initial_free_area:
         if (left_boundary == UINT64_MAX) {
                 /* No partitions at all? Then the whole disk is up for grabs. */
 
-                first_lba = round_up_size(first_lba, grainsz);
-                last_lba = round_down_size(last_lba, grainsz);
+                //first_lba = round_up_size(first_lba, grainsz);
+                //last_lba = round_down_size(last_lba, grainsz);
 
                 if (last_lba > first_lba) {
                         r = context_add_free_area(context, last_lba - first_lba, NULL);
@@ -4098,9 +4257,9 @@ add_initial_free_area:
                 /* Add space left of first partition */
                 assert(left_boundary >= first_lba);
 
-                first_lba = round_up_size(first_lba, grainsz);
-                left_boundary = round_down_size(left_boundary, grainsz);
-                last_lba = round_down_size(last_lba, grainsz);
+              //  first_lba = round_up_size(first_lba, grainsz);
+               // left_boundary = round_down_size(left_boundary, grainsz);
+               // last_lba = round_down_size(last_lba, grainsz);
 
                 if (left_boundary > first_lba) {
                         r = context_add_free_area(context, left_boundary - first_lba, NULL);
@@ -7833,7 +7992,7 @@ static int context_mangle_partitions(Context *context) {
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to grow partition: %m");
 
-                                log_info("Growing existing partition %" PRIu64 ".", p->partno);
+                                log_info("Growing existing partition %" PRIu64 ". %lu", p->partno, p->new_size);
                                 changed = true;
                         }
 
